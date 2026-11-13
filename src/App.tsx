@@ -1095,20 +1095,20 @@ export function App() {
             </div>
 
             <p style={{ fontSize: '13px', color: '#cbd5e1', lineHeight: '1.5', marginBottom: '16px' }}>
-              NETRA requires <strong>Groq</strong> (for vision &amp; reasoning) and <strong>Gnani Vachana</strong> (for voice recognition &amp; audio). Please add them in the <strong>Secrets panel in Settings</strong> or in your environment:
+              NETRA requires <strong>Groq</strong> (for vision &amp; reasoning) and <strong>Gnani Vachana</strong> (for voice recognition &amp; audio). Please configure them in your server <strong>Environment Variables</strong> (or <strong>Settings &gt; Secrets</strong>):
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px', fontFamily: 'monospace', fontSize: '11px' }}>
               <div style={{ background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: '8px', padding: '10px' }}>
                 <div style={{ color: '#818cf8', fontWeight: 600, marginBottom: '4px' }}>GROQ_KEY (Required):</div>
-                <div style={{ color: '#f8fafc', wordBreak: 'break-all', userSelect: 'all' }}>
-                  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
+                <div style={{ color: '#f8fafc', lineHeight: '1.45' }}>
+                  Configure your Groq API key in the server environment
                 </div>
               </div>
               <div style={{ background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '10px' }}>
                 <div style={{ color: '#34d399', fontWeight: 600, marginBottom: '4px' }}>GNANI_KEY (Speech &amp; Voice):</div>
-                <div style={{ color: '#f8fafc', wordBreak: 'break-all', userSelect: 'all' }}>
-                  vach_1ytE2CY5X2OccVsgVhIhZv0M36azLyT0kkALYsS0rlQkR688CgIdC7lLKRxRHaYgD8qlPCXTXs80ZsuLlmRzHiOP46LwGhdK_a89cb6cae218b36ab603b9080c6fa91b
+                <div style={{ color: '#f8fafc', lineHeight: '1.45' }}>
+                  Configure your Gnani Vachana API key in the server environment
                 </div>
               </div>
             </div>

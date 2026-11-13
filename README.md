@@ -13,15 +13,15 @@ NETRA is an assistive vision and spatial guidance platform designed for blind an
 
 ## Required Secrets & Environment Variables
 
-Add these secrets in AI Studio **Settings > Secrets** or in your `.env` file on the server:
+Add these secrets in your host's **Environment Variables** (e.g., Render Dashboard or AI Studio **Settings > Secrets**) or in your local `.env` file on the server:
 
 ### Required Credentials
 ```env
 # Groq API Key (Used for all vision, navigation, and planning model calls)
-GROQ_KEY="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"
+GROQ_KEY="your_groq_api_key"
 
 # Gnani Vachana API Key (Used for STT transcription and optional TTS synthesis)
-GNANI_KEY="vach_1ytE2CY5X2OccVsgVhIhZv0M36azLyT0kkALYsS0rlQkR688CgIdC7lLKRxRHaYgD8qlPCXTXs80ZsuLlmRzHiOP46LwGhdK_a89cb6cae218b36ab603b9080c6fa91b"
+GNANI_KEY="your_gnani_api_key"
 ```
 
 ### Optional Settings (Defaults applied if unset)
@@ -44,7 +44,10 @@ GNANI_TTS_LANGUAGE=en-IN
 # - "off": Uses browser client speech synthesis only
 GNANI_TTS_MODE=inquiry
 
-# Express Server Port
+# Optional path for persistent memory JSON (useful with a mounted Render Persistent Disk)
+# MEMORY_FILE_PATH=/data/long_term_memory.json
+
+# Express Server Port (automatically assigned by Render)
 PORT=3000
 ```
 

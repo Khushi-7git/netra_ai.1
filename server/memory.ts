@@ -5,7 +5,8 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const MEMORY_FILE = path.join(__dirname, '..', 'long_term_memory.json');
+const MEMORY_FILE =
+  process.env.MEMORY_FILE_PATH || path.join(__dirname, '..', 'long_term_memory.json');
 
 export interface LocationEntry {
   description: string;
@@ -51,6 +52,10 @@ export class PersistentMemory {
 
   save(): void {
     try {
+      const dir = path.dirname(MEMORY_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
       fs.writeFileSync(MEMORY_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
     } catch {
       // Container may be read-only; keep working from memory
