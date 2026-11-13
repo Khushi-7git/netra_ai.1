@@ -1,0 +1,959 @@
+Build the full-stack web app **NETRA**, an AI assistive vision and navigation app for blind and visually impaired users. It is a mobile-first, camera-based, voice-and-audio-driven app that uses Gemini to describe the environment, read social cues, guide hands to small targets, remember places, and walk the user through physical tasks. I am porting an existing Python/FastAPI app. Reproduce its behaviour and look exactly, using the architecture below, which fits AI Studio's Node.js runtime. Follow this spec literally. Do not add features, screens, or visual styling that are not described. Everything marked VERBATIM must be copied exactly.
+
+# 1. PLATFORM RULES (non-negotiable)
+
+1. Stack: React + TypeScript client (Vite) and a **Node.js + Express server** (`server.ts`) that serves the built client and the `/api/*` routes. No Python.
+2. All Gemini calls happen **on the server only**, with the `@google/genai` SDK: `import { GoogleGenAI } from "@google/genai"; const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });`. The key must never reach client code. Use `ai.models.generateContent({ model, contents, config })` and read `response.text`.
+3. **Do not use WebSockets.** The original used a WebSocket, but the preview environment may not support them. Use plain HTTP `POST` endpoints (section 4) that return the same typed messages the WebSocket used to push. If a WebSocket would work, still do not use one.
+4. Camera and microphone: add `"requestFramePermissions": ["camera", "microphone"]` to `metadata.json`. Handle permission denial gracefully (spoken and on-screen "CAMERA ERROR" / "MIC BLOCKED").
+5. Express JSON body limit must be raised: `app.use(express.json({ limit: "15mb" }))`.
+6. Gemini model name is one constant on the server: `MODEL_NAME = "gemini-3-flash-preview"`. If that model is unavailable, change only that constant to the newest Gemini Flash model. Use the same model for every call (nav, micro, task, inquiry, planner).
+7. Every Gemini call uses `config: { responseMimeType: "application/json" }`. Micro-nav and task-guidance calls also use `temperature: 0.1`. Navigation frames time out after 20 s (`Promise.race`). On any error, log it and return a harmless empty response. The server must never crash.
+8. Parse model JSON with a helper that strips a leading ```` ```json ```` or ```` ``` ```` and a trailing ```` ``` ```` before `JSON.parse`.
+9. If `GEMINI_API_KEY` is missing, show a clear error on the page and in the server log. Do not crash.
+
+# 2. FILE LAYOUT
+
+```
+server.ts                 Express app, routes, static serving
+server/config.ts          constants (section 3)
+server/prompts.ts         the 5 prompts, VERBATIM (Appendix A)
+server/session.ts         SessionState + GlobalTaskState (section 5)
+server/speech.ts          SpeechManager (section 6)
+server/tracker.ts         VisualTracker (section 7)
+server/memory.ts          PersistentMemory (section 8)
+server/processor.ts       navFrame / microFrame / taskFrame / inquiry (section 9)
+src/main.tsx, App.tsx     React entry, one App component holding the layers
+src/styles.css           CSS, VERBATIM (Appendix C)
+src/lib/audio.ts          SpatialAudio class (section 11)
+src/lib/network.ts        fetch helpers + message router
+src/lib/input.ts          gestures, shake, compass, recording
+metadata.json             name "NETRA", requestFramePermissions
+```
+
+# 3. CONSTANTS (`server/config.ts`)
+
+- IMAGE_SIZE = 224 x 160 (max box; keep aspect). Micro-nav uses 224 x 224 (max box).
+- MODEL_TIMEOUT = 20 s
+- Speech repeat intervals (s): CRITICAL 1.0, HIGH 2.0, MEDIUM 4.0, LOW 8.0
+- Distance thresholds (m): CRITICAL 0.5, DANGER 1.0, CAUTION 2.0
+- Client: scanInterval 1000 ms, microInterval 200 ms. Frame size and JPEG quality are set in 9.0.
+
+# 4. API CONTRACT
+
+The client generates a `sessionId` (UUID) on load and sends it in every request. The server keeps per-session state in an in-memory `Map<string, SessionState>`.
+
+Every endpoint returns `{ "messages": [ ... ] }`. Each message has exactly the shape of the original WebSocket messages (listed per endpoint). The client passes each message, in order, through one router `handleServerMessage(msg)` (section 10.3).
+
+- `POST /api/session/start` with `{ sessionId }`: creates the session. If the global task state is valid (active and updated within 300 s), restore it into the session, set `mode = "task"`, and return `[{type:"task_update", plan, current_step_index, restored:true}, {type:"speak", text:"Resuming. Step: <current step instruction>"}]`. Otherwise return `[]`.
+- `POST /api/frame` with `{ sessionId, image: <base64 JPEG, no data: prefix>, heading: number }`: runs the processor for the session's current `mode`. If a frame for that session is already being processed, **skip immediately** and return `{ messages: [], skipped: true }` (same as the original frame-dropping). Message types: `result` (nav), `micro_result` (micro), `task_update` and `speak` (task). Nav mode may also return `speak`.
+- `POST /api/inquiry` with `{ sessionId, image: <base64 JPEG>, audio: <base64>, audioMime: string }`: handles a voice question (section 9.4). Returns `task_update` and/or `inquiry_result` and then `speak`. Order matters. `inquiry_result` comes before the final `speak`.
+- `POST /api/session/end` with `{ sessionId }`: if the session's task is active, copy it to the global task state (so a later start can resume). Then delete the session.
+- `GET /api/health` returns `{ ok: true, hasKey: boolean }`.
+
+# 5. SESSION STATE (`server/session.ts`)
+
+SessionState fields: `recentSpeeches` (max 5), `socialContext: string[]` (max 5, drop oldest), `framesReceived`, `framesProcessed`, `framesSkipped`, `currentGoal: string|null`, `microTarget: string|null`, `mode: "nav"|"micro"|"task"` (default "nav"), `objectMemory: Map<string, {timestamp, direction, distance, category}>` (short-term), `taskState {isActive, plan[], currentStepIndex}`, `isProcessing`, `speechManager`, `tracker`.
+
+- `updateMemory(subject, direction, distance, category)`: set `objectMemory[subject.toLowerCase()]`, then prune entries older than 30 s.
+- `getMemoryContext()`: if empty return `"No objects in memory."`, else `"Objects in memory: " + entries.map(n => `${name} (${direction}, ${distance.toFixed(1)}m, ${ageSeconds}s ago)`).join(", ")`.
+
+GlobalTaskState (one module-level instance, shared by all sessions): `isActive, plan, currentStepIndex, taskName, lastUpdated`. `isValid()` is `isActive && now - lastUpdated < 300 s`. `updateFrom(taskState, taskName?)` copies the fields, sets taskName if given, and sets lastUpdated = now.
+
+# 6. SPEECH MANAGER (`server/speech.ts`), decides whether a spoken line is sent
+
+State: `currentSpeechEndTime`, `lastSemanticKey`, `lastSpeechTime`, `lastDistance` (999), `lastPriority` ("low"), `announcedSubjects: Map<string, ts>`.
+
+`semanticKey(subject, direction, category)`: lowercase and trim the subject, split on spaces, remove these words: grey gray white black brown red blue green open closed small large big little tiny huge old new patterned textured wooden metal (if that leaves nothing, keep the original), then return `"<core>|<direction>|<category>"`.
+
+`shouldSpeak(priority, subject, direction, category, distance) -> [boolean, reason]`:
+1. priority "critical": return [true, "critical_alert"].
+2. If still speaking (`now < currentSpeechEndTime`): allow only if priorityValue(priority) > priorityValue(lastPriority) AND `distance < lastDistance - 0.3` → [true, "priority_escalation"]; else [false, "speech_in_progress"]. Priority values: critical 4, high 3, medium 2, low 1, info 0 (unknown 0).
+3. If semanticKey equals lastSemanticKey: if `lastDistance - distance > 0.5` → [true, "distance_closed"]; else if `now - lastSpeechTime < interval[priority]` (default medium) → [false, "same_context_cooldown"]; else [true, "interval_passed"].
+4. Else (new context): if `now - lastSpeechTime < 3.0` → [false, "global_cooldown"]; if `now - announcedSubjects[subject.toLowerCase()] < 10` → [false, "subject_recently_announced"]; else [true, "new_context"].
+
+`recordSpeech(text, priority, subject, direction, category, distance)`: `currentSpeechEndTime = now + (wordCount / 2.5 + 0.5)` seconds; update lastSemanticKey, lastSpeechTime, lastDistance, lastPriority; `announcedSubjects[subject.toLowerCase()] = now`; keep the last 5 speeches; drop announced subjects older than 60 s.
+
+# 7. VISUAL TRACKER (`server/tracker.ts`)
+
+`processDetections(detections[])`: confidenceThreshold 75, timeout 2 s.
+1. Drop tracked objects with `now - lastSeen >= 2 s`.
+2. For each detection: skip if no `name` or `confidence_score` (default 100) < 75. Key = `name.toLowerCase()`; `distance = Number(det.distance ?? 0)`; `direction = det.direction ?? "ahead"`; `category = det.category ?? "unknown"`.
+3. Existing key: `lastSeen = now; framesDetected++; rawDistance = d; distance = distance*0.7 + d*0.3; direction = new; confidence = new; if framesDetected >= 2 → isStable = true`. New key: create with `framesDetected = 1`, `distance = d`, `isStable = false`.
+4. Return only `isStable` objects.
+
+# 8. PERSISTENT MEMORY (`server/memory.ts`)
+
+JSON file `long_term_memory.json` next to the server: `{ locations: { [name]: {description, timestamp} }, history: [{object, location, scene, timestamp}] }`. Load on boot (fall back to empty on any error). Save after every change (swallow write errors, since the container may be read-only, and keep working from memory).
+- `addLocation(name, description)`: set and save.
+- `getLocationSummary()`: `"No tagged locations yet."` or `locations.map(([k,v]) => `'${k}': ${v.description}`).join(", ")`.
+- `logObject(name, locationTag, sceneDesc)`: ignore empty names and "none"/"unknown"/"null". Skip if the last history entry has the same object name and is under 10 s old. Append, cap at 1000 (keep the newest), save.
+- `getHistoryContext()`: last 50 entries, one per line: `[HH:MM] Saw <object>[ at '<location>'] (<scene>)`, or `"No object history recorded."`.
+
+# 9. PROCESSORS (`server/processor.ts`)
+
+**9.0 Images.** The client captures from the video, downsizes to at most 224 x 160 (micro: 224 x 224), preserving aspect, and sends JPEG base64 (quality 0.5). The server passes it straight to Gemini as `{ inlineData: { mimeType: "image/jpeg", data } }`. No server-side image library. Content parts are `[{text: prompt}, {inlineData}]`.
+
+**9.1 Navigation frame** (mode "nav"):
+1. `task = currentGoal ? "SEARCHING FOR: " + currentGoal : "General Guidance"`. `temporal_context = last 3 items of socialContext joined with " | "`, or `"None"`.
+2. Build AI_PROMPT by replacing `{heading}` (the heading sent by the client, rounded), `{task}`, `{memory}` (getMemoryContext), `{known_locations}` (getLocationSummary), `{temporal_context}`. Use explicit `replaceAll`, not template literals, because the prompt contains JSON braces.
+3. Call Gemini (20 s timeout). If the response is empty, return no messages. Read: `priority` (lowercase, default "low"), `category` (default "navigation"), `subject`, `distance` (float, default 2.0), `direction` (default "ahead"), `speech`, `scene_description`, `target_detected`.
+4. If `scene_description` is non-empty, push it to socialContext. If `subject` is set AND category is one of `target|social|text|furniture`, call `logObject(subject, current_location_tag, scene_description)`. If `subject` is set, call `updateMemory(subject, direction, distance, category)`.
+5. Distance appended to speech: if `speech` is non-empty and `distance > 0` and `String(Math.trunc(distance))` is NOT a substring of `speech`, then `speech = speech + " " + formatDistanceSpeech(distance) + " away."`. `formatDistanceSpeech`: under 1 m → `"<int(m*100)> centimeters"`; under 10 m → `"<m.toFixed(1)> meters"`; else `"<int(m)> meters"`.
+6. `[speak, reason] = speechManager.shouldSpeak(priority, subject, direction, category, distance)`. If `speak && speech` → `recordSpeech(...)` and add `{type:"speak", text: speech}`.
+7. Tracker: `stable = tracker.processDetections(result.objects ?? [])`. UI objects = `stable.map(o => ({name, distance, category}))` if any stable, else `(result.objects ?? []).slice(0, 5)`.
+8. Always add (after any speak message): `{type:"result", priority, distance, direction, target_detected, current_goal, social_cues, environment, objects: uiObjects, scene: scene_description, ms: elapsed, stats:{received, processed}}`. Also include `thinking` from the model in this message, so the Intel panel can show it. This is a deliberate addition.
+9. Server console log per frame: priority, scene, distance, speech, spoke or skipped (reason), ms.
+
+**9.2 Micro-navigation frame** (mode "micro"): requires `microTarget`. Prompt = MICRO_NAV_PROMPT with `{target}` replaced. Temperature 0.1. Return `[{type:"micro_result", x: result.x ?? 0, y: result.y ?? 0, action: result.action ?? "move", guidance_speech: result.guidance_speech ?? null, ms}]`.
+
+**9.3 Task frame** (mode "task"):
+- If the task is inactive or has no plan → set mode "nav", return nothing.
+- If `currentStepIndex >= plan.length` → return `[{type:"speak", text:"Task already completed."}]`, reset the task state, set mode "nav".
+- Prompt = TASK_GUIDANCE_PROMPT with `{current_step}` replaced by the current step's instruction. Temperature 0.1.
+- If `step_completed`: mark the step `completed = true`, increment the index. If that was the last step → speak `"Task completed! Great job."`, `isActive = false`, mode "nav". Otherwise speak `"Step done. Next: <next instruction>"`.
+- Else if the model's `speech` is non-empty: `speechManager.shouldSpeak("medium","task","guidance","task",1.0)`; if true, `recordSpeech(...)` and speak it.
+- Always update the global task state, then add `{type:"task_update", plan, current_step_index, visual_feedback, ms}`.
+
+**9.4 Inquiry** (voice question; this is the multimodal brain). Requires image and audio.
+1. `task_str` = `"ACTIVE TASK: Step <idx+1>/<total> - '<instruction or Complete>'"` if a task is active, else `"No active task"`.
+2. Prompt = INQUIRY_PROMPT with `{history_context}` (memory.getHistoryContext) and `{task_state}` replaced.
+3. Contents: `[ {text: prompt}, {inlineData: image/jpeg}, {inlineData: {mimeType: audioMime || "audio/webm", data: audioBase64}} ]`.
+4. Parse: `intent` (default "info"), `speech` (default "I didn't catch that."), `thinking`.
+5. **Call `handleIntent` exactly ONCE** and use its return value as the speech override if it is a string. (The original called it twice by mistake. That duplicated tags and generated two task plans. Do not copy that.)
+6. Return `task_update` messages produced by the handler (if any), then `{type:"inquiry_result", thinking, current_goal, mode, task_active, ms}`, then `{type:"speak", text: speech}`.
+7. On any error, return just `{type:"speak", text:"Sorry, I had an error processing that."}`.
+
+**handleIntent(intent, result, state)** returns an optional speech override:
+- `micro_nav`: if `result.target`: mode = "micro", microTarget = target; return `"Guiding you to the <target>. Hold steady."`
+- `search`: mode = "nav"; goal = `result.search_target || result.goal`; if goal: currentGoal = goal; return `"Okay, searching for <goal>."`
+- `stop`: mode "nav", currentGoal = null, microTarget = null, reset taskState, global.isActive = false; return `"Stopping all tasks and searches."`
+- `tag`: if `tag_name` and `scene_description`: `memory.addLocation(...)`; return `"Tagged location as <name>."`
+- `task`: generate a plan (below).
+- anything starting with `task_`: task control (below).
+- otherwise return null and use the model's own `speech` (this covers `info`).
+
+**Plan generation:** if no task_name return `"I didn't hear a task name."`. Prompt = TASK_PLANNER_PROMPT with `{user_query}` = task name and `{memory_context}` = `historyContext + "\nLocations: " + locationSummary`. Text-only call, no image. If the parsed result is a non-empty array: taskState = {isActive:true, plan, currentStepIndex:0}, mode = "task", update the global state with the name, add a `task_update {plan, current_step_index:0}` message, and return `"Plan generated for <name>. First step: <first instruction>"`. If it is not a valid array return `"I couldn't generate a valid plan."`. On error return `"Sorry, I failed to create a plan."`
+
+**Task control** (no active task → `"No active task to control."`):
+- `task_skip` / `task_done`: mark the current step completed, index++. If past the end: isActive = false, mode "nav", global inactive, return `"Task completed."`. Else return `"Done. Next: <next instruction>"`.
+- `task_previous`: if index > 0 then index--, mark that step not completed, return `"Back to: <instruction>"`; else `"Already at start."`
+- `task_repeat`: `"Current step: <instruction>"`
+- `task_status`: `"Step <index+1> of <total>."`
+- Afterwards update the global state and add `{type:"task_update", plan, current_step_index}`.
+
+# 10. CLIENT BEHAVIOUR
+
+**10.1 Rendering.** Port the HTML in Appendix B to React, **keeping every id, class, ARIA attribute, and the DOM nesting identical**, because the CSS in Appendix C depends on them. Render these layers in this order: a11y announcer, debug console, `<video id="cam">`, HUD layer, task HUD, intelligence layer. Load Google Fonts Inter (400, 600) and JetBrains Mono (400, 700). Theme color `#000000`. The app is full-screen black.
+
+**10.2 State** (`CONFIG`, `STATE`): `scanInterval 1000`, `microInterval 200`, `active=false`, `debug=false`, `mode="nav"`, `heading=0`, `lastShake=0`, `lastGeiger=0`, `sessionId`.
+
+**10.3 Message router** `handleServerMessage(msg)`, called for every message from every API response, in order:
+1. If `msg.mode` exists and differs from `STATE.mode`: set `STATE.mode`. If "micro": `showFeedback("MICRO MODE")`, `audio.startMicroTone()`, `updateStatus("Precision","active")`, restart the loop at 200 ms. Otherwise: `showFeedback("TASK MODE")` or `"NAV MODE"`, `audio.stopMicroTone()`, `updateStatus("Scanning","active")`, restart the loop at 1000 ms.
+2. Audio feedback. For `micro_result`: `audio.updateMicroTone(x,y)`; Geiger click if `now - lastGeiger > 250 - proximity*200` ms, where `proximity = 1 - min(sqrt(x²+y²), 140)/140`; if `action === "push"`: `stopMicroTone()`, `playSuccess()`, `showFeedback("PUSH NOW")`; then stop. For other messages with `distance > 0`: if `target_detected` → `playTargetLocked`, else `playSonar(direction, distance, priority)`.
+3. UI by type: `result` → updateNavUI; `micro_result` → updateMicroUI; `task_update` → updateTaskUI; `inquiry_result` → updateInquiryUI; `speak` → `speechSynthesis.speak(new SpeechSynthesisUtterance(text))`.
+
+**10.4 UI functions**
+- `showFeedback(text)`: set text in `#mainFeedback`, add `.visible`, remove after 1500 ms.
+- `updateStatus(text, cls)`: set `#statusText`, and `#statusDot.className = "status-dot " + cls`. **Fix:** the original never added `.visible` to `#statusPill`, so the status pill was always hidden. Add `.visible` to it once the app is started and remove it when stopped.
+- `toggleIntelLayer()`: toggle `STATE.debug`; show/hide `#intelligence-layer` via `.visible`; tone 800 Hz sine 0.1 s with "INTEL ON", or 400 Hz with "INTEL OFF". Also keep `aria-hidden` in sync.
+- `updateNavUI`: search banner shows `SEARCH: <goal>` when `current_goal` is set, else hidden. `thinking` goes into `#thinkingBox`. Social cue box is shown only when `social_cues.intent` exists and is not "none": `👥 <b>Social:</b> <details or intent>`. Env cue box is shown only when `environment.occupancy === "occupied"`: `🚧 <b>Env:</b> <markers[0] or "Obstruction">`. Telemetry: distance shows as `<n>cm` if under 1 m, else `<x.x>m` (unit in `<small>`); `#dirVal` shows direction; latency shows `<ms><small>ms</small>`. Objects: if empty show a muted centered "Scanning..." row; else set `#objCount` and render rows `.obj-item` with the name and `.obj-dist` (`.near` if distance < 1) showing `distance.toFixed(1)m`. Escape all model text (no raw HTML injection).
+- `updateMicroUI`: latency only.
+- `updateTaskUI`: show `#task-hud` (`.visible`), set `#taskFeedback` to `visual_feedback`, latency; render each step as `.task-step` with `completed` (index < current), `active` (index == current), a `.step-num` showing index+1, and the instruction. If `current_step_index >= plan.length`, hide the HUD after 5 s.
+- `updateInquiryUI`: thinking, search banner and latency, as above.
+
+**10.5 Start / stop** (double-tap toggles).
+- Start: `audio.init()` (must run inside the user gesture), request motion permission on iOS if `DeviceMotionEvent.requestPermission` exists, `getUserMedia({video:{facingMode:{ideal:"environment"}, width:{ideal:1280}}})`, attach to `#cam`, wait for `loadedmetadata`, `STATE.active = true`, `body.classList.add("active")`, `showFeedback("NETRA ACTIVE")`, `updateStatus("Connecting...","active")`, call `/api/session/start` and route its messages, then `updateStatus("Scanning","active")` and start the 1000 ms loop. On camera failure: `showFeedback("CAMERA ERROR")`, `updateStatus("Cam Error","error")`.
+- Stop: active = false, mode "nav", stop the micro tone, remove `body.active`, clear the loop, stop all camera tracks, `/api/session/end`, `showFeedback("STOPPED")`, `updateStatus("Ready","")`.
+- Loop tick: skip if not active **or a request is still in flight** (this replaces the original's server-side frame dropping). Otherwise capture a frame and `POST /api/frame` with `heading: STATE.heading` (the original never sent it; send it), then route the returned messages. A failed request must not stop the loop. After 3 consecutive failures show `updateStatus("Reconnecting...","error")`, back off with `min(5000, 1000 * 1.5^retries)` ms, and recover automatically.
+
+**10.6 Input (touch, the primary mode)**
+- 3-finger touch: toggle the debug console `#console-log` (`.visible`). The console mirrors `console.log` / `console.error`.
+- Double-tap (two touchstarts under 300 ms): toggle the system. Ignore touches inside `#intelligence-layer` while it is visible.
+- Hold 600 ms: start recording. Release: stop and send.
+- Shake (`accelerationIncludingGravity` magnitude minus 9.8 above 20, at most once per second): `toggleIntelLayer()`.
+- `deviceorientation`: `heading = webkitCompassHeading` or `360 - alpha` (rounded); show it in `#compassVal` as `<n>°`.
+- **Additive desktop fallbacks** (the AI Studio preview is usually on desktop, with no touch): double-click = double-tap; hold mouse 600 ms = hold; keyboard: `Enter` toggles the system, hold `Space` to ask, `I` toggles Intel, `D` toggles the debug console. Also show one small, unobtrusive "Start" button over the black screen while inactive, so first-time users can start by click. The button is hidden once active. No other new UI.
+
+**10.7 Voice recording (hold to ask).**
+- If not active: `showFeedback("START FIRST")`, and do nothing else.
+- Start: `showFeedback("LISTENING...")`, `speechSynthesis.cancel()`, 880 Hz sine 0.1 s, `getUserMedia({audio:true})`, MediaRecorder. Pick the first supported mime type from `["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/ogg"]`, and remember it. Mic failure: `showFeedback("MIC BLOCKED")`.
+- Stop: `showFeedback("THINKING...")`, 440 Hz sine 0.1 s. On stop, build the blob, base64-encode it (without the data: prefix), capture a 4:3 frame (max 224 x 168), and `POST /api/inquiry` with `{sessionId, image, audio, audioMime}`. Route the returned messages in order. Stop the mic tracks. Ignore recordings shorter than about 300 ms. After an error show `showFeedback("TRY AGAIN")`.
+
+# 11. AUDIO ENGINE (`src/lib/audio.ts`), the `SpatialAudio` class
+
+Create ONE instance and import it as a module. **Fix:** the original declared `const spatialAudio` in a classic script and then checked `window.spatialAudio`, which was always undefined, so every sound was silently dead. Here, import the instance directly so that all sounds actually play.
+- `init()`: create an AudioContext once; master gain 0.5 → destination.
+- `playTone(freq, type, dur)`: `ctx.resume()`; oscillator → gain (0.3 at start, exponential ramp to 0.01 over `dur`) → master; start and stop after `dur`.
+- `startMicroTone()`: no-op if already playing; triangle oscillator at 440 Hz → StereoPanner (0) → gain (0, linear ramp to 0.2 over 0.5 s) → master.
+- `updateMicroTone(x, y)`: `pan = clamp(x/20, -1, 1)`, `setTargetAtTime(pan, now, 0.1)`; `freq = clamp(440 + (y/20)*200, 100, 1000)`, `setTargetAtTime(freq, now, 0.1)`.
+- `stopMicroTone()`: ramp gain to 0 over 0.2 s, stop the oscillator at +0.2 s, clear the references after 250 ms, `isPlayingMicro = false`.
+- `playSonar(dir, dist, prio)`: pan = `sin(parseDir(dir) * PI/180)` where parseDir returns -45 if the text includes "left", 45 if "right", else 0. Frequency is 880 if prio is "critical" else 440. Sine oscillator → gain (0, linear to 0.4 at +0.05 s, exponential to 0.01 at +0.2 s) → panner → master; run 0.2 s.
+- `playTargetLocked()`: `playTone(1200, "square", 0.1)`.
+- `playSuccess()`: C5 523.25 Hz sine 0.2 s; E5 659.25 Hz at +100 ms (0.2 s); G5 783.99 Hz at +200 ms (0.4 s).
+- `playGeigerClick(x, y)`: `proximity = 1 - min(sqrt(x²+y²),140)/140`; triangle oscillator at `1000 + proximity*800` Hz, gain 0.2 → exponential to 0.01 over 0.05 s.
+
+# 12. DELIBERATE IMPROVEMENTS (the only allowed deviations)
+
+1. Use HTTP instead of a WebSocket (platform).
+2. Call `handleIntent` once, not twice.
+3. Make the audio engine actually reachable (module import).
+4. The status pill actually becomes visible.
+5. Send the real compass `heading` to the server.
+6. In AI_PROMPT's output schema, `objects` items also include `"distance": <float meters>, "direction": "<clock position>", "confidence_score": <int 0-100>, "category": "<category>"`. (In the original the objects had only `name` and `risk_level`, so the object list always showed 0.0 m.) Change nothing else in the prompts.
+7. No service worker and no PWA caching. (The original service worker cached files that did not exist and never installed.) Keep the manifest and a simple generated icon.
+8. Desktop fallbacks and the small Start button (10.6).
+9. A `thinking` field is returned in the `result` message.
+10. Recording guard: ignore holds shorter than about 300 ms, and show "TRY AGAIN" if an inquiry request fails.
+11. Auto-recovery of the frame loop after network failures (10.5).
+
+# 13. QUALITY BAR, "RUNS SMOOTHLY"
+
+- The project must build and run in the preview with no console errors. After building, **fix any build issues yourself** and run through this checklist before you finish:
+  1. `/api/health` returns ok and `hasKey: true`.
+  2. Start works: the camera appears, the black screen turns into the live video, and the status shows "Scanning".
+  3. Nav frames return a `result` with objects, and the object list and Intel panel update.
+  4. Speech is deduplicated: the same line is not repeated every second.
+  5. Hold-to-ask with "Remember this as my desk" tags a location (once!). Then "Help me make coffee" produces ONE plan with the task HUD. "Skip this step" advances. "Cancel task" clears it.
+  6. "Press the elevator button" switches to micro mode: continuous tone, Geiger clicks, "PUSH NOW" when action is push.
+  7. Stop releases the camera. Start again works.
+- Never block the UI thread. Never let an unhandled promise rejection or a server exception take the server down. Log server errors with a short tag.
+- Accessibility: keep every `aria-*` / `role` attribute from Appendix B, and keep the live regions (`#a11y-announcer`, `#mainFeedback role="alert"`). Mirror each spoken line into `#a11y-announcer`.
+- Do not add a login, settings page, onboarding, analytics, or any extra libraries beyond React, Vite, Express and `@google/genai`.
+
+---
+
+# APPENDIX A: THE FIVE PROMPTS (VERBATIM)
+
+Store these as string constants in `server/prompts.ts` (use backtick strings). Single-brace tokens that are placeholders are exactly: `{heading}` `{task}` `{temporal_context}` `{memory}` `{known_locations}` `{target}` `{history_context}` `{task_state}` `{user_query}` `{memory_context}` `{current_step}`. Replace them with `replaceAll`. Every other brace is literal JSON and must stay as written. Do not paraphrase, shorten or "improve" these prompts. The only edit is the already-applied `objects` schema change from section 12.
+
+## AI_PROMPT (navigation frames)
+
+~~~text
+You are NETRA, a highly advanced assistive vision agent with Social Intelligence and Long-Term Spatial Memory.
+Your goal is to provide "Socially Aware" guidance that interprets intent, dynamics, and environmental states, while maintaining a sense of place.
+
+INPUTS:
+1. Current Video Frame & Heading {heading}°
+2. Task: {task}
+3. Temporal Context (Previous 5 seconds): {temporal_context}
+4. Memory: {memory}
+5. Known Locations: {known_locations}
+
+Reasoning Protocol:
+1. LOCALIZE (Memory Palace):
+   - Compare current scene with "Known Locations" descriptions.
+   - If visual match is strong, identify as "current_location_tag".
+   
+2. ANALYZE INTERPERSONAL INTENT (If humans present):
+   - Look at facial micro-expressions (smiling vs neutral) and gestures (waving, pointing).
+   - Classify intent: "Passive Bystander" (ignore) vs "Active Engagement" (alert user).
+   - Output: "Person approaching [Active: Smiling]"
+
+3. ANALYZE CROWD DYNAMICS (If multiple people):
+   - Compare Current Frame vs Temporal Context.
+   - Detect flow: Are they moving away? Closing in? Is a queue moving?
+   - Output: "Queue moving fast, step forward."
+
+4. INFER ENVIRONMENTAL STATE (Contextual Markers):
+   - Do not just detect objects; detect their STATE.
+   - Chair + Jacket/Bag = "Occupied Chair" (Do not sit).
+   - Table + Dirty Plates = "Uncleared Table".
+   - Output: "Seat available" or "Seat occupied by jacket."
+
+5. DETECT AFFORDANCES (Interaction Logic):
+   - For doors/handles/buttons, describe the MECHANISM.
+   - Door -> Look for hinges/handle type -> "Pull-handle" vs "Push-plate".
+   - Output: "Closed door, pull handle on right."
+
+Output JSON:
+{
+    "thinking": "<Internal reasoning chain about social cues, hazards, and location matches>",
+    "target_detected": <boolean>,
+    "priority": "critical|high|medium|low",
+    "category": "social|navigation|hazard|text|target",
+    "subject": "<Main object name>",
+    "current_location_tag": "<Name of known location if matched, else null>",
+    "distance": <float>,
+    "direction": "<clock position>",
+    "confidence_score": <int 0-100>,
+    "speech": "<Concise, actionable instruction. Prioritize SOCIAL ALERTS if active engagement detected.>",
+    "scene_description": "<Brief summary of scene for context buffer>",
+    "social_cues": {
+        "intent": "passive|interaction_seeking|hazard|none",
+        "details": "<e.g., Person waving from 2m away>",
+        "crowd_flow": "static|moving_fast|dispersing|none"
+    },
+    "environment": {
+        "occupancy": "free|occupied|unknown",
+        "markers": ["<e.g., jacket on chair>"],
+        "affordances": "<e.g., pull_handle>"
+    },
+    "objects": [{ "name": "...", "risk_level": "low|med|high", "distance": <float meters>, "direction": "<clock position>", "confidence_score": <int 0-100>, "category": "<category>" }]
+}
+
+CRITICAL: If user in immediate danger (<0.5m), start speech with 'STOP'.
+~~~
+
+## MICRO_NAV_PROMPT
+
+~~~text
+You are NETRA MICRO, a high-speed precision guidance system.
+Your SOLE GOAL is to guide the user's hand to a specific small target (button, keyhole, handle, switch).
+The user is holding the camera. Treat the camera view as the user's "eye" or "hand" perspective.
+
+TARGET: {target}
+
+INSTRUCTIONS:
+1. Locate the TARGET in the image. If not visible, say "Target not visible".
+2. Calculate the relative position of the target from the CENTER of the image.
+3. Provide X/Y vectors to move the hand/camera to center the target.
+   - X: -100 (Move Left) to 100 (Move Right). 0 is center.
+   - Y: -100 (Move Down) to 100 (Move Up). 0 is center.
+   
+4. DETERMINE ACTION:
+   - "move": Target is visible but not centered or too far.
+   - "push": Target is CENTERED (abs(X) < 10 and abs(Y) < 10) and CLOSE (fills significant portion of frame).
+   - "stop": User is about to miss or overshoot.
+
+5. GENERATE GUIDANCE SPEECH based on the largest vector component:
+   - If abs(X) > abs(Y) and abs(X) > 15: Use "Left" or "Right".
+   - If abs(Y) > abs(X) and abs(Y) > 15: Use "Up" or "Down".
+   - If target is getting very close (fills frame): Use "Forward slowly".
+   - If action is "push": Use "Push now".
+   - Otherwise, `guidance_speech` should be null.
+
+Output JSON:
+{
+    "x": <int -100 to 100>,
+    "y": <int -100 to 100>,
+    "action": "move|push|stop",
+    "guidance_speech": "Left|Right|Up|Down|Forward slowly|Push now|null"
+}
+~~~
+
+## INQUIRY_PROMPT
+
+~~~text
+You are NETRA, the brain of a smart navigation assistant for the blind.
+Listen to the user's voice command and analyze the visual context.
+You have access to a long-term object history:
+{history_context}
+
+Current Task State: {task_state}
+
+DECISION PROTOCOL:
+1. MICRO-NAVIGATION: If user wants to manipulate a specific small object (e.g. "Press the elevator button", "Plug in the charger", "Find the light switch").
+   -> Output: "intent": "micro_nav", "target": "<specific small target>"
+2. NAVIGATION/SEARCH: If user wants to find/locate/go to something (e.g. "Find a chair", "Where is the door?").
+   -> Output: "intent": "search", "goal": "<specific object>"
+3. MEMORY TAGGING: If user wants to remember/tag the current spot (e.g. "Remember this as My Desk", "This is the Kitchen").
+   -> Output: "intent": "tag", "tag_name": "<name>", "scene_description": "<concise visual summary of location>"
+4. TASK ASSISTANCE: If user asks for help with a complex physical process (e.g. "Help me make coffee", "How do I fix this?", "Guide me through cooking pasta").
+   -> Output: "intent": "task", "task_name": "<name of task>"
+5. TASK CONTROL: If user wants to control an ongoing task:
+   - "Skip this step" / "Next step" / "Skip" -> Output: "intent": "task_skip"
+   - "Go back" / "Previous step" / "Undo" -> Output: "intent": "task_previous"
+   - "Repeat" / "What's the current step?" / "Say that again" -> Output: "intent": "task_repeat"
+   - "Mark as done" / "Done" / "I did it" / "Finished this step" -> Output: "intent": "task_done"
+   - "What step am I on?" / "Progress" / "How many steps left?" -> Output: "intent": "task_status"
+6. MEMORY RETRIEVAL: If user asks about past item location (e.g. "Where did I leave my keys?", "Where was the bag?").
+   -> Use the provided history context to answer.
+   -> Output: "intent": "info", "speech": "<Answer based on history>"
+7. INFORMATION: If user wants description, text reading, or general queries.
+   -> Output: "intent": "info"
+8. STOP/CANCEL: If user wants to end a current search or task completely (e.g. "Stop looking", "Cancel task", "Stop", "End task").
+   -> Output: "intent": "stop"
+
+Output JSON:
+{
+    "thinking": "<Reasoning about intent>",
+    "intent": "search|info|stop|tag|micro_nav|task|task_skip|task_previous|task_repeat|task_done|task_status",
+    "search_target": "<Object to find or null>",
+    "target": "<Micro-nav target or null>",
+    "tag_name": "<Name if intent is tag, else null>",
+    "task_name": "<Name of task if intent is task, else null>",
+    "scene_description": "<Visual summary if tag, else null>",
+    "speech": "<Direct, helpful answer to the question>"
+}
+~~~
+
+## TASK_PLANNER_PROMPT
+
+~~~text
+You are NETRA's Task Planner.
+User Request: "{user_query}"
+Long Term Memory: {memory_context}
+
+Goal: Break down the user's physical task into granular, observable steps.
+1. Check memory for known locations of needed items.
+2. If an item's location is known, include it in the instruction (e.g. "Get the mug from the Desk").
+3. Steps must be sequential and physical.
+
+Output JSON:
+[
+    {
+        "step_id": 1,
+        "instruction": "Find the mug (Last seen on Desk)",
+        "items": ["mug"],
+        "completed": false
+    },
+    ...
+]
+~~~
+
+## TASK_GUIDANCE_PROMPT
+
+~~~text
+You are NETRA, guiding a user through a physical task.
+Current Step: "{current_step}"
+Image: [Provided Image]
+
+Goal: Verify if the current step is completed based on visual evidence.
+1. Analyze the image to see if the action described in "{current_step}" has been performed.
+2. If completed, set "step_completed": true.
+3. If not completed, provide "guidance_string" to help the user (e.g. "I see the mug, now pick it up").
+4. If completed, "guidance_string" should announce the NEXT step or success.
+
+Output JSON:
+{
+    "step_completed": boolean,
+    "speech": "guidance string",
+    "visual_feedback": "Short status for HUD"
+}
+~~~
+
+# APPENDIX B: DOM STRUCTURE (VERBATIM, port to React and keep ids and classes)
+
+Head metadata: title `NETRA - Visual Navigation`, viewport `width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no`, description `Visual Navigation Assistant for the Blind and Visually Impaired`, theme-color `#000000`.
+
+~~~html
+    <div id="a11y-announcer" class="sr-only" aria-live="assertive"></div>
+    <div id="console-log" role="log" aria-label="Debug Console" aria-hidden="true"></div>
+
+    <!-- LAYER 1: REALITY -->
+    <video 
+      id="cam" 
+      autoplay 
+      playsinline 
+      muted 
+      aria-label="Camera Feed"
+      role="img"
+    ></video>
+
+    <!-- LAYER 2: VITAL HUD -->
+    <main class="hud-layer">
+      <header class="hud-header" role="banner">
+        <div id="statusPill" class="status-pill" role="status" aria-live="polite">
+          <div id="statusDot" class="status-dot"></div>
+          <span id="statusText" class="status-text">Ready</span>
+        </div>
+        <div id="searchBanner" class="search-banner" role="status" aria-live="assertive">
+          Searching...
+        </div>
+      </header>
+
+      <section class="hud-center" aria-label="Primary Feedback">
+        <div class="heartbeat" aria-hidden="true"></div>
+        <div id="mainFeedback" class="main-feedback" role="alert"></div>
+      </section>
+
+      <footer class="hud-footer" role="contentinfo">
+        <div id="gestureHint" class="gesture-hint">
+          Double-tap to Start • Hold to Ask • Shake for Intel
+        </div>
+      </footer>
+    </main>
+
+    <!-- LAYER 3: TASK HUD -->
+    <aside id="task-hud" role="complementary" aria-label="Current Task Steps">
+      <div class="task-header">Interactive Guidance</div>
+      <div id="taskList" role="list"></div>
+      <div
+        id="taskFeedback"
+        class="task-feedback"
+        role="status"
+        aria-live="polite"
+      ></div>
+    </aside>
+
+    <!-- LAYER 4: INTELLIGENCE GRID -->
+    <section 
+      id="intelligence-layer" 
+      role="region" 
+      aria-label="AI Intelligence details" 
+      aria-hidden="true"
+    >
+      <article class="glass-card area-reasoning">
+        <header class="card-header">
+          <h2>🧠 AI Reasoning</h2>
+          <span id="compassVal" class="accent-text">0° N</span>
+        </header>
+        <div id="thinkingBox" class="reasoning-text" role="log">Initializing...</div>
+        <div id="socialCue" class="context-cue cue-info" role="status"></div>
+        <div id="envCue" class="context-cue cue-warning" role="status"></div>
+      </article>
+
+      <article class="glass-card area-objects">
+        <header class="card-header">
+          <h2>Detected Objects</h2>
+          <span id="objCount" class="badge">0</span>
+        </header>
+        <div id="objList" class="obj-list" role="list"></div>
+      </article>
+
+      <div class="area-telemetry">
+        <div class="stat-box">
+          <div id="distVal" class="stat-val">--</div>
+          <div class="stat-label">Distance</div>
+        </div>
+        <div class="stat-box">
+          <div id="dirVal" class="stat-val">--</div>
+          <div class="stat-label">Direction</div>
+        </div>
+        <div class="stat-box">
+          <div id="latVal" class="stat-val">--</div>
+          <div class="stat-label">Latency</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- External JavaScript -->
+    <!-- (scripts are replaced by the React entry) -->
+  
+~~~
+
+# APPENDIX C: STYLESHEET (VERBATIM, put in `src/styles.css`)
+
+Use exactly this CSS. Do not use Tailwind or a UI library. The `body.active` class drives the camera opacity and the heartbeat. `#intelligence-layer.visible`, `#task-hud.visible`, `.search-banner.visible`, `.main-feedback.visible`, and `.status-pill.visible` drive visibility.
+
+~~~css
+/* NETRA UI - Variables */
+
+:root {
+    /* Palette - OLED Black & Electric Accents */
+    --bg-deep: #000000;
+    --surface: rgba(10, 10, 12, 0.85);
+    --surface-glass: rgba(10, 10, 12, 0.6);
+    
+    --accent-primary: #6366f1; /* Indigo-500 */
+    --accent-glow: rgba(99, 102, 241, 0.4);
+    
+    --critical: #ef4444; /* Red-500 */
+    --warning: #f59e0b;  /* Amber-500 */
+    --safe: #10b981;     /* Emerald-500 */
+    --info: #3b82f6;     /* Blue-500 */
+
+    --text-main: #ffffff;
+    --text-sec: rgba(255, 255, 255, 0.7);
+    --text-mute: rgba(255, 255, 255, 0.4);
+
+    --radius-lg: 16px;
+    --radius-md: 12px;
+    --radius-sm: 8px;
+
+    --ease-out: cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* NETRA UI - Base & Reset */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background-color: var(--bg-deep);
+    color: var(--text-main);
+    font-family: 'Inter', system-ui, sans-serif;
+    height: 100vh;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+}
+
+/* Scrollbar Hide */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* NETRA UI - Layout System */
+
+/* LAYER 1: REALITY (Video) */
+#cam {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    z-index: 1;
+    opacity: 0.3; /* Passive state */
+    transition: opacity 0.8s var(--ease-out), filter 0.5s;
+    filter: grayscale(20%) contrast(1.1);
+}
+
+body.active #cam {
+    opacity: 1;
+    filter: grayscale(0%) contrast(1.0);
+}
+
+/* LAYER 2: VITAL HUD */
+.hud-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    pointer-events: none; /* Let touches pass through */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 24px;
+}
+
+.hud-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+}
+
+.hud-center {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* LAYER 3: TASK HUD (Side) */
+#task-hud {
+    position: fixed;
+    top: 20%; right: 20px;
+    width: 260px;
+    background: rgba(10, 10, 12, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(255,255,255,0.1);
+    padding: 16px;
+    display: none; /* Hidden by default */
+    flex-direction: column;
+    gap: 12px;
+    z-index: 15;
+    transition: opacity 0.3s;
+}
+#task-hud.visible { display: flex; }
+
+/* LAYER 4: INTELLIGENCE GRID */
+#intelligence-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0,0,0,0.4);
+    padding: 16px;
+    display: grid;
+    gap: 12px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s;
+    
+    /* Layout: Mobile First */
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: 
+        "reasoning"
+        "objects"
+        "telemetry";
+}
+
+#intelligence-layer.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+@media (min-width: 768px) {
+    #intelligence-layer {
+        grid-template-columns: 320px 1fr 320px;
+        grid-template-rows: 1fr;
+        grid-template-areas: "reasoning main objects";
+    }
+    .area-telemetry { display: none; }
+}
+
+.area-reasoning { grid-area: reasoning; max-height: 40vh; }
+.area-objects { grid-area: objects; max-height: 40vh; }
+.area-telemetry { 
+    grid-area: telemetry; 
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+/* NETRA UI - Components */
+
+/* Status Pill */
+.status-pill {
+    background: var(--surface);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: 8px 16px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transform: translateY(-60px);
+    opacity: 0;
+    transition: all 0.5s var(--ease-out);
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.status-pill.visible { transform: translateY(0); opacity: 1; }
+
+.status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-mute);
+    transition: background 0.3s;
+}
+.status-dot.active { background: var(--safe); box-shadow: 0 0 10px var(--safe); }
+.status-dot.error { background: var(--critical); }
+
+.status-text {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+/* Banners & Feedback */
+.search-banner {
+    background: var(--warning);
+    color: black;
+    padding: 6px 12px;
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0;
+    transform: scale(0.9);
+    transition: all 0.3s;
+}
+.search-banner.visible { opacity: 1; transform: scale(1); }
+
+.main-feedback {
+    font-size: 48px;
+    font-weight: 600;
+    text-align: center;
+    opacity: 0;
+    transition: opacity 0.4s;
+    text-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    width: 100%;
+}
+.main-feedback.visible { opacity: 1; }
+
+.gesture-hint {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-sec);
+    text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+    opacity: 0.6;
+    transition: opacity 0.3s;
+}
+
+/* Cards */
+.glass-card {
+    background: var(--surface-glass);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.card-header h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-mute);
+    font-weight: 600;
+}
+
+.badge {
+    background: var(--accent-primary);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* Lists and Text */
+.reasoning-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--accent-primary);
+    border-left: 2px solid var(--accent-primary);
+    padding-left: 10px;
+    overflow-y: auto;
+}
+
+.obj-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+}
+.obj-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.03);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+}
+.obj-dist {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-sec);
+    font-size: 12px;
+}
+.obj-dist.near { color: var(--critical); font-weight: 700; }
+
+/* Stats */
+.stat-box {
+    background: var(--surface-glass);
+    border-radius: var(--radius-md);
+    padding: 10px;
+    text-align: center;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.stat-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-main);
+}
+.stat-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    margin-top: 4px;
+}
+
+/* Task Flow */
+.task-header {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent-primary);
+    font-weight: 700;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding-bottom: 8px;
+}
+
+.task-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.02);
+    font-size: 13px;
+    color: var(--text-sec);
+    transition: all 0.3s;
+}
+
+.task-step.active {
+    background: rgba(99, 102, 241, 0.15);
+    border-left: 2px solid var(--accent-primary);
+    color: white;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.task-step.completed {
+    text-decoration: line-through;
+    color: var(--text-mute);
+    opacity: 0.6;
+}
+
+.step-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    opacity: 0.5;
+}
+.task-step.active .step-num { opacity: 1; color: var(--accent-primary); }
+.task-step.completed .step-num { color: var(--safe); content: "✓"; }
+
+/* Context Cues */
+.context-cue {
+    margin-top: 8px;
+    padding: 8px;
+    background: rgba(255,255,255,0.05);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+.cue-info { border-left: 2px solid var(--info); }
+.cue-warning { border-left: 2px solid var(--warning); }
+
+/* Debug Console */
+#console-log {
+    position: fixed;
+    bottom: 0; left: 0;
+    width: 100%; height: 25vh;
+    background: rgba(0,0,0,0.8);
+    color: #fff;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 10px;
+    overflow-y: scroll;
+    z-index: 9999;
+    display: none;
+}
+#console-log.visible { display: block; }
+.log-entry { border-bottom: 1px solid #444; padding: 2px 0; }
+.log-error { color: var(--critical); }
+.log-warn { color: var(--warning); }
+.log-info { color: var(--info); }
+
+/* NETRA UI - Animations */
+
+.heartbeat {
+    position: absolute;
+    width: 12px; height: 12px;
+    background: var(--accent-primary);
+    border-radius: 50%;
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+body.active .heartbeat {
+    opacity: 0.8;
+    animation: pulse-ring 2s infinite;
+}
+
+@keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 var(--accent-glow); }
+    70% { box-shadow: 0 0 0 20px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+}
+~~~

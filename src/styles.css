@@ -1,0 +1,456 @@
+/* NETRA UI - Variables */
+
+:root {
+    /* Palette - OLED Black & Electric Accents */
+    --bg-deep: #000000;
+    --surface: rgba(10, 10, 12, 0.85);
+    --surface-glass: rgba(10, 10, 12, 0.6);
+    
+    --accent-primary: #6366f1; /* Indigo-500 */
+    --accent-glow: rgba(99, 102, 241, 0.4);
+    
+    --critical: #ef4444; /* Red-500 */
+    --warning: #f59e0b;  /* Amber-500 */
+    --safe: #10b981;     /* Emerald-500 */
+    --info: #3b82f6;     /* Blue-500 */
+
+    --text-main: #ffffff;
+    --text-sec: rgba(255, 255, 255, 0.7);
+    --text-mute: rgba(255, 255, 255, 0.4);
+
+    --radius-lg: 16px;
+    --radius-md: 12px;
+    --radius-sm: 8px;
+
+    --ease-out: cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* NETRA UI - Base & Reset */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background-color: var(--bg-deep);
+    color: var(--text-main);
+    font-family: 'Inter', system-ui, sans-serif;
+    height: 100vh;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+}
+
+/* Scrollbar Hide */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* NETRA UI - Layout System */
+
+/* LAYER 1: REALITY (Video) */
+#cam {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    z-index: 1;
+    opacity: 0.3; /* Passive state */
+    transition: opacity 0.8s var(--ease-out), filter 0.5s;
+    filter: grayscale(20%) contrast(1.1);
+}
+
+body.active #cam {
+    opacity: 1;
+    filter: grayscale(0%) contrast(1.0);
+}
+
+/* LAYER 2: VITAL HUD */
+.hud-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    pointer-events: none; /* Let touches pass through */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 24px;
+}
+
+.hud-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+}
+
+.hud-center {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* LAYER 3: TASK HUD (Side) */
+#task-hud {
+    position: fixed;
+    top: 20%; right: 20px;
+    width: 260px;
+    background: rgba(10, 10, 12, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(255,255,255,0.1);
+    padding: 16px;
+    display: none; /* Hidden by default */
+    flex-direction: column;
+    gap: 12px;
+    z-index: 15;
+    transition: opacity 0.3s;
+}
+#task-hud.visible { display: flex; }
+
+/* LAYER 4: INTELLIGENCE GRID */
+#intelligence-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0,0,0,0.4);
+    padding: 16px;
+    display: grid;
+    gap: 12px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s;
+    
+    /* Layout: Mobile First */
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: 
+        "reasoning"
+        "objects"
+        "telemetry";
+}
+
+#intelligence-layer.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+@media (min-width: 768px) {
+    #intelligence-layer {
+        grid-template-columns: 320px 1fr 320px;
+        grid-template-rows: 1fr;
+        grid-template-areas: "reasoning main objects";
+    }
+    .area-telemetry { display: none; }
+}
+
+.area-reasoning { grid-area: reasoning; max-height: 40vh; }
+.area-objects { grid-area: objects; max-height: 40vh; }
+.area-telemetry { 
+    grid-area: telemetry; 
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+/* NETRA UI - Components */
+
+/* Status Pill */
+.status-pill {
+    background: var(--surface);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: 8px 16px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transform: translateY(-60px);
+    opacity: 0;
+    transition: all 0.5s var(--ease-out);
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.status-pill.visible { transform: translateY(0); opacity: 1; }
+
+.status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-mute);
+    transition: background 0.3s;
+}
+.status-dot.active { background: var(--safe); box-shadow: 0 0 10px var(--safe); }
+.status-dot.error { background: var(--critical); }
+
+.status-text {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+/* Banners & Feedback */
+.search-banner {
+    background: var(--warning);
+    color: black;
+    padding: 6px 12px;
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0;
+    transform: scale(0.9);
+    transition: all 0.3s;
+}
+.search-banner.visible { opacity: 1; transform: scale(1); }
+
+.main-feedback {
+    font-size: 48px;
+    font-weight: 600;
+    text-align: center;
+    opacity: 0;
+    transition: opacity 0.4s;
+    text-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    width: 100%;
+}
+.main-feedback.visible { opacity: 1; }
+
+.gesture-hint {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-sec);
+    text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+    opacity: 0.6;
+    transition: opacity 0.3s;
+}
+
+/* Cards */
+.glass-card {
+    background: var(--surface-glass);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.card-header h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-mute);
+    font-weight: 600;
+}
+
+.badge {
+    background: var(--accent-primary);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* Lists and Text */
+.reasoning-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--accent-primary);
+    border-left: 2px solid var(--accent-primary);
+    padding-left: 10px;
+    overflow-y: auto;
+}
+
+.obj-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+}
+.obj-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.03);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+}
+.obj-dist {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-sec);
+    font-size: 12px;
+}
+.obj-dist.near { color: var(--critical); font-weight: 700; }
+
+/* Stats */
+.stat-box {
+    background: var(--surface-glass);
+    border-radius: var(--radius-md);
+    padding: 10px;
+    text-align: center;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.stat-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-main);
+}
+.stat-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    margin-top: 4px;
+}
+
+/* Task Flow */
+.task-header {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent-primary);
+    font-weight: 700;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding-bottom: 8px;
+}
+
+.task-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.02);
+    font-size: 13px;
+    color: var(--text-sec);
+    transition: all 0.3s;
+}
+
+.task-step.active {
+    background: rgba(99, 102, 241, 0.15);
+    border-left: 2px solid var(--accent-primary);
+    color: white;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.task-step.completed {
+    text-decoration: line-through;
+    color: var(--text-mute);
+    opacity: 0.6;
+}
+
+.step-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    opacity: 0.5;
+}
+.task-step.active .step-num { opacity: 1; color: var(--accent-primary); }
+.task-step.completed .step-num { color: var(--safe); content: "✓"; }
+
+/* Context Cues */
+.context-cue {
+    margin-top: 8px;
+    padding: 8px;
+    background: rgba(255,255,255,0.05);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+.context-cue:empty { display: none; }
+.cue-info { border-left: 2px solid var(--info); }
+.cue-warning { border-left: 2px solid var(--warning); }
+
+/* Debug Console */
+#console-log {
+    position: fixed;
+    bottom: 0; left: 0;
+    width: 100%; height: 25vh;
+    background: rgba(0,0,0,0.8);
+    color: #fff;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 10px;
+    overflow-y: scroll;
+    z-index: 9999;
+    display: none;
+}
+#console-log.visible { display: block; }
+.log-entry { border-bottom: 1px solid #444; padding: 2px 0; }
+.log-error { color: var(--critical); }
+.log-warn { color: var(--warning); }
+.log-info { color: var(--info); }
+
+/* NETRA UI - Animations */
+
+.heartbeat {
+    position: absolute;
+    width: 12px; height: 12px;
+    background: var(--accent-primary);
+    border-radius: 50%;
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+body.active .heartbeat {
+    opacity: 0.8;
+    animation: pulse-ring 2s infinite;
+}
+
+@keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 var(--accent-glow); }
+    70% { box-shadow: 0 0 0 20px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* Additive desktop start button (Section 10.6 & 12.8) */
+.desktop-start-btn {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 30;
+    background: #6366f1;
+    color: #ffffff;
+    border: none;
+    padding: 12px 28px;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    border-radius: 24px;
+    cursor: pointer;
+    box-shadow: 0 4px 24px rgba(99, 102, 241, 0.4);
+    transition: opacity 0.3s, transform 0.2s, background 0.2s;
+}
+.desktop-start-btn:hover {
+    background: #4f46e5;
+    transform: translate(-50%, -50%) scale(1.04);
+}
+body.active .desktop-start-btn {
+    display: none !important;
+}

@@ -1,0 +1,20 @@
+{
+  "locations": {
+    "Kitchen": {
+      "description": "Granite counter with coffee machine",
+      "timestamp": 1794320431928
+    },
+    "Office Desk": {
+      "description": "Corner desk with monitors and keyboard",
+      "timestamp": 1794321131515
+    }
+  },
+  "history": [
+    {
+      "object": "Coffee Mug",
+      "location": "Kitchen",
+      "scene": "Blue ceramic mug near stove",
+      "timestamp": 1794320431928
+    }
+  ]
+}

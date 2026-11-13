@@ -1,0 +1,11 @@
+{
+  "name": "Remix netra_ai",
+  "description": "Imported from GitHub",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
