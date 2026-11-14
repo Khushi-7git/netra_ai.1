@@ -236,6 +236,7 @@ body.active #cam {
 }
 
 .mic-query-btn {
+    position: relative;
     pointer-events: auto;
     display: inline-flex;
     align-items: center;
@@ -268,16 +269,84 @@ body.active #cam {
 }
 
 .mic-query-btn.recording {
-    background: rgba(239, 68, 68, 0.88);
-    border-color: rgba(255, 255, 255, 0.45);
-    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
-    animation: mic-pulse 1.5s infinite;
+    background: rgba(239, 68, 68, 0.9);
+    border-color: rgba(255, 255, 255, 0.55);
+    box-shadow: 0 0 22px rgba(239, 68, 68, 0.55);
+    animation: mic-pulse 1.6s ease-in-out infinite;
 }
 
+.mic-query-btn.recording::before,
+.mic-query-btn.recording::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: inherit;
+    border: 2px solid rgba(239, 68, 68, 0.75);
+    pointer-events: none;
+    animation: mic-wave-ring 1.8s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.mic-query-btn.recording::after {
+    animation-delay: 0.9s;
+}
+
+.mic-wave {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 18px;
+}
+
+.mic-wave-bar {
+    display: block;
+    flex-shrink: 0;
+    width: 3px;
+    height: 10px;
+    border-radius: 9999px;
+    background: #ffffff;
+    transform-origin: center;
+    animation: mic-wave-bar 0.9s ease-in-out infinite;
+}
+
+.mic-wave-bar:nth-child(1) { animation-delay: 0s; }
+.mic-wave-bar:nth-child(2) { animation-delay: 0.15s; }
+.mic-wave-bar:nth-child(3) { animation-delay: 0.3s; }
+.mic-wave-bar:nth-child(4) { animation-delay: 0.45s; }
+
 @keyframes mic-pulse {
-    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
-    70% { box-shadow: 0 0 0 14px rgba(239, 68, 68, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    0%, 100% { box-shadow: 0 0 12px rgba(239, 68, 68, 0.45); }
+    50% { box-shadow: 0 0 26px rgba(239, 68, 68, 0.85); }
+}
+
+@keyframes mic-wave-ring {
+    0% {
+        transform: scale(1);
+        opacity: 0.85;
+    }
+    100% {
+        transform: scale(1.38, 1.7);
+        opacity: 0;
+    }
+}
+
+@keyframes mic-wave-bar {
+    0%, 100% {
+        transform: scaleY(0.45);
+        opacity: 0.65;
+    }
+    50% {
+        transform: scaleY(1.65);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mic-query-btn.recording,
+    .mic-query-btn.recording::before,
+    .mic-query-btn.recording::after,
+    .mic-wave-bar {
+        animation: none;
+    }
 }
 
 .gesture-hint {

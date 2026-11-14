@@ -986,6 +986,14 @@ export function App() {
             onClick={handleToggleMicQuery}
           >
             {isRecordingQuery ? <Square size={18} aria-hidden="true" /> : <Mic size={18} aria-hidden="true" />}
+            {isRecordingQuery && (
+              <span className="mic-wave" aria-hidden="true">
+                <span className="mic-wave-bar"></span>
+                <span className="mic-wave-bar"></span>
+                <span className="mic-wave-bar"></span>
+                <span className="mic-wave-bar"></span>
+              </span>
+            )}
             <span>{isRecordingQuery ? 'Listening... Tap to Search' : 'Query'}</span>
           </button>
           <div id="gestureHint" className="gesture-hint">
