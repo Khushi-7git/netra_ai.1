@@ -56,6 +56,7 @@ export class SessionState {
   currentGoal: string | null = null;
   microTarget: string | null = null;
   mode: 'nav' | 'micro' | 'task' = 'nav';
+  language: string = 'en-IN';
   objectMemory: Map<string, MemoryObject> = new Map();
   taskState: TaskState = {
     isActive: false,

@@ -241,13 +241,13 @@ export const spatialAudio = new SpatialAudio();
  * speechSynthesis fallback and cancellation support.
  */
 export class AudioPlayerQueue {
-  private queue: Array<{ audioB64?: string; text: string }> = [];
+  private queue: Array<{ audioB64?: string; text: string; lang?: string }> = [];
   private currentAudio: HTMLAudioElement | null = null;
   private isPlaying: boolean = false;
 
-  play(text: string, audioB64?: string): void {
+  play(text: string, audioB64?: string, lang?: string): void {
     if (!text && !audioB64) return;
-    this.queue.push({ text, audioB64 });
+    this.queue.push({ text, audioB64, lang });
     if (!this.isPlaying) {
       this.playNext();
     }
@@ -273,7 +273,7 @@ export class AudioPlayerQueue {
           if (handled) return;
           handled = true;
           this.currentAudio = null;
-          this.speakNative(item.text, () => this.playNext());
+          this.speakNative(item.text, () => this.playNext(), item.lang);
         };
 
         audio.onended = () => {
@@ -291,17 +291,20 @@ export class AudioPlayerQueue {
           fallback();
         });
       } catch {
-        this.speakNative(item.text, () => this.playNext());
+        this.speakNative(item.text, () => this.playNext(), item.lang);
       }
     } else {
-      this.speakNative(item.text, () => this.playNext());
+      this.speakNative(item.text, () => this.playNext(), item.lang);
     }
   }
 
-  private speakNative(text: string, onEnd: () => void): void {
+  private speakNative(text: string, onEnd: () => void, lang?: string): void {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window && text) {
       try {
         const utter = new SpeechSynthesisUtterance(text);
+        if (lang) {
+          utter.lang = lang;
+        }
         utter.onend = () => onEnd();
         utter.onerror = () => onEnd();
         window.speechSynthesis.speak(utter);

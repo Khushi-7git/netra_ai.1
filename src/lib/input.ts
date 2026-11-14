@@ -15,9 +15,6 @@ export function setupInputListeners(
   handlers: InputHandlers
 ): () => void {
   let lastTouchEndTime = 0;
-  let touchStartCount = 0;
-  let holdTimer: ReturnType<typeof setTimeout> | null = null;
-  let isHolding = false;
   let lastShakeTime = 0;
 
   // Touch handlers
@@ -28,55 +25,23 @@ export function setupInputListeners(
       return;
     }
 
-    // Ignore touches inside intelligence layer if visible
+    // Ignore touches inside interactive buttons or intelligence layer
     const target = e.target as HTMLElement | null;
-    if (target?.closest('#intelligence-layer.visible')) {
+    if (
+      target?.closest('button, #micQueryBtn, #startBtn, #intelligence-layer.visible, #console-log')
+    ) {
       return;
     }
 
-    touchStartCount = e.touches.length;
-
-    // Check double-tap
+    // Check double-tap to start/stop
     const now = Date.now();
     if (e.touches.length === 1) {
       if (now - lastTouchEndTime < 300) {
-        if (holdTimer) {
-          clearTimeout(holdTimer);
-          holdTimer = null;
-        }
         handlers.onToggleSystem();
         lastTouchEndTime = 0;
         return;
       }
       lastTouchEndTime = now;
-
-      // Start hold timer (600 ms)
-      holdTimer = setTimeout(() => {
-        isHolding = true;
-        handlers.onStartRecording();
-      }, 600);
-    }
-  };
-
-  const handleTouchEnd = () => {
-    if (holdTimer) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
-    if (isHolding) {
-      isHolding = false;
-      handlers.onStopRecording();
-    }
-  };
-
-  const handleTouchCancel = () => {
-    if (holdTimer) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
-    if (isHolding) {
-      isHolding = false;
-      handlers.onStopRecording();
     }
   };
 
@@ -108,37 +73,11 @@ export function setupInputListeners(
     handlers.onHeadingChange(Math.round(heading));
   };
 
-  // Desktop fallbacks
-  let mouseHoldTimer: ReturnType<typeof setTimeout> | null = null;
-  let isMouseHolding = false;
-
-  const handleMouseDown = (e: MouseEvent) => {
-    if (e.button !== 0) return;
-    const target = e.target as HTMLElement | null;
-    if (target?.closest('#intelligence-layer.visible') || target?.closest('#console-log')) {
-      return;
-    }
-
-    mouseHoldTimer = setTimeout(() => {
-      isMouseHolding = true;
-      handlers.onStartRecording();
-    }, 600);
-  };
-
-  const handleMouseUp = () => {
-    if (mouseHoldTimer) {
-      clearTimeout(mouseHoldTimer);
-      mouseHoldTimer = null;
-    }
-    if (isMouseHolding) {
-      isMouseHolding = false;
-      handlers.onStopRecording();
-    }
-  };
-
   const handleDblClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement | null;
-    if (target?.closest('#intelligence-layer.visible') || target?.closest('#console-log')) {
+    if (
+      target?.closest('button, #micQueryBtn, #startBtn, #intelligence-layer.visible, #console-log')
+    ) {
       return;
     }
     handlers.onToggleSystem();
@@ -174,26 +113,18 @@ export function setupInputListeners(
   };
 
   window.addEventListener('touchstart', handleTouchStart, { passive: true });
-  window.addEventListener('touchend', handleTouchEnd);
-  window.addEventListener('touchcancel', handleTouchCancel);
   window.addEventListener('devicemotion', handleDeviceMotion);
   window.addEventListener('deviceorientation', handleDeviceOrientation);
 
-  window.addEventListener('mousedown', handleMouseDown);
-  window.addEventListener('mouseup', handleMouseUp);
   window.addEventListener('dblclick', handleDblClick);
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('keyup', handleKeyUp);
 
   return () => {
     window.removeEventListener('touchstart', handleTouchStart);
-    window.removeEventListener('touchend', handleTouchEnd);
-    window.removeEventListener('touchcancel', handleTouchCancel);
     window.removeEventListener('devicemotion', handleDeviceMotion);
     window.removeEventListener('deviceorientation', handleDeviceOrientation);
 
-    window.removeEventListener('mousedown', handleMouseDown);
-    window.removeEventListener('mouseup', handleMouseUp);
     window.removeEventListener('dblclick', handleDblClick);
     window.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('keyup', handleKeyUp);

@@ -8,11 +8,11 @@ export const GNANI_KEY = process.env.GNANI_KEY || '';
 
 // Optional models and speech settings
 export const GROQ_MODEL =
-  process.env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+  process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
 export const GNANI_STT_LANGUAGE = process.env.GNANI_STT_LANGUAGE || 'indic-auto';
 export const GNANI_TTS_VOICE = process.env.GNANI_TTS_VOICE || 'Nalini';
 export const GNANI_TTS_LANGUAGE = process.env.GNANI_TTS_LANGUAGE || 'en-IN';
-export const GNANI_TTS_MODE = (process.env.GNANI_TTS_MODE || 'inquiry') as
+export const GNANI_TTS_MODE = (process.env.GNANI_TTS_MODE || 'all') as
   | 'inquiry'
   | 'all'
   | 'off';

@@ -64,7 +64,8 @@ Output JSON:
     "objects": [{ "name": "...", "risk_level": "low|med|high", "distance": <float meters>, "direction": "<clock position>", "confidence_score": <int 0-100>, "category": "<category>" }]
 }
 
-CRITICAL: If user in immediate danger (<0.5m), start speech with 'STOP'.`;
+CRITICAL: If user in immediate danger (<0.5m), start speech with 'STOP'.
+LANGUAGE RULE: {language_instruction}`;
 
 export const MICRO_NAV_PROMPT = `You are NETRA MICRO, a high-speed precision guidance system.
 Your SOLE GOAL is to guide the user's hand to a specific small target (button, keyhole, handle, switch).
@@ -97,7 +98,8 @@ Output JSON:
     "y": <int -100 to 100>,
     "action": "move|push|stop",
     "guidance_speech": "Left|Right|Up|Down|Forward slowly|Push now|null"
-}`;
+}
+LANGUAGE RULE: {language_instruction}`;
 
 export const INQUIRY_PROMPT = `You are NETRA, the brain of a smart navigation assistant for the blind.
 Listen to the user's voice command and analyze the visual context.
@@ -140,8 +142,10 @@ Output JSON:
     "tag_name": "<Name if intent is tag, else null>",
     "task_name": "<Name of task if intent is task, else null>",
     "scene_description": "<Visual summary if tag, else null>",
-    "speech": "<Direct, helpful answer to the question>"
-}`;
+    "response_language": "<BCP-47 language code matching the user's language or requested language, e.g. en-IN, hi-IN, ta-IN, te-IN, kn-IN, ml-IN, mr-IN, bn-IN, gu-IN, pa-IN, es-ES, fr-FR>",
+    "speech": "<Direct, helpful answer written in the user's language (or requested language)>"
+}
+LANGUAGE RULE: {language_instruction}`;
 
 export const TASK_PLANNER_PROMPT = `You are NETRA's Task Planner.
 User Request: "{user_query}"
@@ -161,7 +165,8 @@ Output JSON:
         "completed": false
     },
     ...
-]`;
+]
+LANGUAGE RULE: {language_instruction}`;
 
 export const TASK_GUIDANCE_PROMPT = `You are NETRA, guiding a user through a physical task.
 Current Step: "{current_step}"
@@ -178,4 +183,5 @@ Output JSON:
     "step_completed": boolean,
     "speech": "guidance string",
     "visual_feedback": "Short status for HUD"
-}`;
+}
+LANGUAGE RULE: {language_instruction}`;

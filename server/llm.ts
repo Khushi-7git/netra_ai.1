@@ -2,21 +2,31 @@
 import { GROQ_KEY, GROQ_MODEL } from './config.js';
 
 let globalRateLimitUntil = 0;
-let activeGroqModel = GROQ_MODEL;
+let activeVisionModel = GROQ_MODEL;
+let activeTextModel = GROQ_MODEL;
 
-// Models known to support multimodal vision and chat on Groq
-const CANDIDATE_FALLBACK_MODELS = [
+// Vision-capable models on Groq (never fall back to text-only models for image requests)
+const CANDIDATE_VISION_MODELS = [
+  'qwen/qwen3.8-27b',
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'meta-llama/llama-4-maverick-17b-128e-instruct',
+];
+
+// Text-capable models on Groq
+const CANDIDATE_TEXT_MODELS = [
   'qwen/qwen3.8-27b',
   'openai/gpt-oss-120b',
   'openai/gpt-oss-20b',
+  'llama-3.3-70b-versatile',
 ];
 
 export function getActiveGroqModel(): string {
-  return activeGroqModel;
+  return activeVisionModel;
 }
 
 export function setActiveGroqModel(model: string): void {
-  activeGroqModel = model;
+  activeVisionModel = model;
+  activeTextModel = model;
 }
 
 export function getGlobalRateLimitStatus(now: number = Date.now()): {
@@ -96,6 +106,23 @@ export function setAskJsonMock(fn: AskJsonFunction | null): void {
   mockAskJsonImpl = fn;
 }
 
+function handleRateLimitResponse(res: Response): void {
+  const retryHeader = res.headers.get('retry-after');
+  let retrySec = 20;
+  if (retryHeader) {
+    const parsed = parseFloat(retryHeader);
+    if (!isNaN(parsed) && parsed > 0) retrySec = Math.ceil(parsed);
+  }
+  setGlobalRateLimit(retrySec);
+  console.warn(`[NETRA] Groq 429 rate limit. Retry delay: ${retrySec}s`);
+}
+
+function sanitizeImageBase64(imageB64?: string): string | null {
+  if (!imageB64 || typeof imageB64 !== 'string') return null;
+  const cleaned = imageB64.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 export async function askJson(
   prompt: string,
   imageB64?: string,
@@ -111,17 +138,21 @@ export async function askJson(
     return null;
   }
 
+  const cleanImg = sanitizeImageBase64(imageB64);
+  const hasImage = Boolean(cleanImg);
+
   const userContent: any[] = [{ type: 'text', text: prompt }];
-  if (imageB64 && typeof imageB64 === 'string' && imageB64.trim().length > 0) {
+  if (cleanImg) {
+    const mime = cleanImg.startsWith('iVBOR') ? 'image/png' : 'image/jpeg';
     userContent.push({
       type: 'image_url',
       image_url: {
-        url: `data:image/jpeg;base64,${imageB64}`,
+        url: `data:${mime};base64,${cleanImg}`,
       },
     });
   }
 
-  const messages = [{ role: 'user', content: userContent }];
+  const messages = [{ role: 'user', content: hasImage ? userContent : prompt }];
 
   const makeCallWithModel = async (
     modelName: string,
@@ -155,77 +186,69 @@ export async function askJson(
   };
 
   try {
-    let currentModel = activeGroqModel;
-    let res = await makeCallWithModel(currentModel, true);
+    const primaryModel = hasImage ? activeVisionModel : activeTextModel;
+    const candidatePool = hasImage ? CANDIDATE_VISION_MODELS : CANDIDATE_TEXT_MODELS;
+    const modelsToTry = [primaryModel, ...candidatePool.filter((m) => m !== primaryModel)];
 
-    // If model returns 404 (model not found / decommissioned / no access), attempt fallback models
-    if (res.status === 404) {
-      console.warn(
-        `[NETRA:Groq] Model "${currentModel}" returned 404. Attempting candidate fallback models...`
-      );
-      for (const fallback of CANDIDATE_FALLBACK_MODELS) {
-        if (fallback === currentModel) continue;
-        const candidateRes = await makeCallWithModel(fallback, true);
-        if (candidateRes.status === 429) {
-          res = candidateRes;
-          break;
-        }
-        if (candidateRes.ok) {
-          res = candidateRes;
-          activeGroqModel = fallback;
-          currentModel = fallback;
-          console.log(`[NETRA:Groq] Successfully switched active model to: ${fallback}`);
-          break;
-        } else if (candidateRes.status === 400 && imageB64) {
-          // If response_format with image is rejected (400), try fallback without response_format
-          const retryRes = await makeCallWithModel(fallback, false);
-          if (retryRes.ok) {
-            res = retryRes;
-            activeGroqModel = fallback;
-            currentModel = fallback;
-            console.log(`[NETRA:Groq] Successfully switched active model to: ${fallback}`);
-            break;
-          }
-        }
-      }
-    }
+    let lastStatus = 0;
+    let lastErrorText = '';
 
-    if (res.status === 429) {
-      const retryHeader = res.headers.get('retry-after');
-      let retrySec = 20;
-      if (retryHeader) {
-        const parsed = parseFloat(retryHeader);
-        if (!isNaN(parsed) && parsed > 0) retrySec = Math.ceil(parsed);
-      }
-      setGlobalRateLimit(retrySec);
-      console.warn(`[NETRA] Groq 429 rate limit. Retry delay: ${retrySec}s`);
-      return null;
-    }
+    for (const modelName of modelsToTry) {
+      let res = await makeCallWithModel(modelName, true);
 
-    // If Groq rejects response_format together with an image (HTTP 400), retry once without it
-    if (res.status === 400 && imageB64) {
-      res = await makeCallWithModel(currentModel, false);
       if (res.status === 429) {
-        const retryHeader = res.headers.get('retry-after');
-        let retrySec = 20;
-        if (retryHeader) {
-          const parsed = parseFloat(retryHeader);
-          if (!isNaN(parsed) && parsed > 0) retrySec = Math.ceil(parsed);
-        }
-        setGlobalRateLimit(retrySec);
-        console.warn(`[NETRA] Groq 429 rate limit. Retry delay: ${retrySec}s`);
+        handleRateLimitResponse(res);
         return null;
       }
+
+      // If response_format is rejected (HTTP 400), retry once on same model without it
+      if (res.status === 400) {
+        const retryRes = await makeCallWithModel(modelName, false);
+        if (retryRes.status === 429) {
+          handleRateLimitResponse(retryRes);
+          return null;
+        }
+        res = retryRes;
+      }
+
+      if (res.ok) {
+        if (hasImage) {
+          if (activeVisionModel !== modelName) {
+            console.log(`[NETRA:Groq] Switched active vision model to: ${modelName}`);
+            activeVisionModel = modelName;
+          }
+        } else if (activeTextModel !== modelName) {
+          console.log(`[NETRA:Groq] Switched active text model to: ${modelName}`);
+          activeTextModel = modelName;
+        }
+
+        const data: any = await res.json();
+        const rawContent = data?.choices?.[0]?.message?.content;
+        return cleanAndParseJson(rawContent);
+      }
+
+      lastStatus = res.status;
+      try {
+        lastErrorText = (await res.text()).slice(0, 300);
+      } catch {
+        lastErrorText = '';
+      }
+
+      // Retry next candidate model on 404 (not found / decommissioned) or 400 (unsupported feature / model mismatch)
+      if (res.status === 404 || res.status === 400) {
+        console.log(
+          `[NETRA:Groq] Model "${modelName}" returned HTTP ${res.status}; trying next fallback...`
+        );
+        continue;
+      }
+
+      break;
     }
 
-    if (!res.ok) {
-      console.warn(`[NETRA:Groq] HTTP error ${res.status}`);
-      return null;
-    }
-
-    const data: any = await res.json();
-    const rawContent = data?.choices?.[0]?.message?.content;
-    return cleanAndParseJson(rawContent);
+    console.warn(
+      `[NETRA:Groq] HTTP error ${lastStatus}${lastErrorText ? ` (${lastErrorText})` : ''}`
+    );
+    return null;
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       console.warn('[NETRA:Groq] Request timed out.');

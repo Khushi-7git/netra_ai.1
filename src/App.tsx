@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Mic, Square } from 'lucide-react';
 import './styles.css';
 import { spatialAudio, audioQueue } from './lib/audio';
 import {
@@ -145,6 +146,7 @@ export function App() {
     hasKey: true,
   });
   const [dismissSecretCard, setDismissSecretCard] = useState<boolean>(false);
+  const [isRecordingQuery, setIsRecordingQuery] = useState<boolean>(false);
 
   const stateRef = useRef<AppState>({
     scanInterval: initialScanMs,
@@ -743,6 +745,7 @@ export function App() {
   const stopSystem = async () => {
     stateRef.current.active = false;
     stateRef.current.mode = 'nav';
+    setIsRecordingQuery(false);
     spatialAudio.stopMicroTone();
     document.body.classList.remove('active');
 
@@ -804,11 +807,15 @@ export function App() {
       handleStopRecording();
     });
     if (!started) {
+      setIsRecordingQuery(false);
       showFeedback('MIC BLOCKED');
+    } else {
+      setIsRecordingQuery(true);
     }
   };
 
   const handleStopRecording = async () => {
+    setIsRecordingQuery(false);
     if (!audioRecorderRef.current.isRecording()) return;
 
     // Requirement 4: Priority - invalidate any frame in flight
@@ -847,6 +854,14 @@ export function App() {
     } catch (err) {
       console.error('[NETRA:Inquiry Client Error]', err);
       showFeedback('TRY AGAIN');
+    }
+  };
+
+  const handleToggleMicQuery = () => {
+    if (audioRecorderRef.current.isRecording()) {
+      handleStopRecording();
+    } else {
+      handleStartRecording();
     }
   };
 
@@ -962,8 +977,19 @@ export function App() {
         </section>
 
         <footer className="hud-footer" role="contentinfo">
+          <button
+            id="micQueryBtn"
+            type="button"
+            className={`mic-query-btn${isRecordingQuery ? ' recording' : ''}`}
+            aria-label={isRecordingQuery ? 'Stop and send voice query' : 'Voice query search'}
+            aria-pressed={isRecordingQuery}
+            onClick={handleToggleMicQuery}
+          >
+            {isRecordingQuery ? <Square size={18} aria-hidden="true" /> : <Mic size={18} aria-hidden="true" />}
+            <span>{isRecordingQuery ? 'Listening... Tap to Search' : 'Query'}</span>
+          </button>
           <div id="gestureHint" className="gesture-hint">
-            Double-tap to Start • Hold to Ask • Shake for Intel
+            Double-tap to Start • Tap Mic for Query • Shake for Intel
           </div>
         </footer>
       </main>
@@ -1116,11 +1142,11 @@ export function App() {
             <details style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '20px', cursor: 'pointer' }}>
               <summary style={{ fontWeight: 600, color: '#cbd5e1' }}>Optional Settings (Defaults)</summary>
               <div style={{ marginTop: '8px', background: 'rgba(0,0,0,0.4)', padding: '10px', borderRadius: '6px', fontFamily: 'monospace', fontSize: '11px', lineHeight: '1.6' }}>
-                <div>GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct</div>
+                <div>GROQ_MODEL=qwen/qwen3.8-27b</div>
                 <div>GNANI_STT_LANGUAGE=indic-auto</div>
                 <div>GNANI_TTS_VOICE=Nalini</div>
                 <div>GNANI_TTS_LANGUAGE=en-IN</div>
-                <div>GNANI_TTS_MODE=inquiry</div>
+                <div>GNANI_TTS_MODE=all</div>
               </div>
             </details>
 

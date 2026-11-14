@@ -13,8 +13,20 @@ import {
   getGlobalRateLimitStatus,
   cleanAndParseJson,
 } from './llm.js';
-import { transcribe, synthesize } from './gnani.js';
+import { transcribeWithLanguage, synthesize, resolveTtsLanguage } from './gnani.js';
 import { GNANI_TTS_MODE } from './config.js';
+
+export function getLanguageInstruction(language?: string): string {
+  if (!language || language.toLowerCase().startsWith('en')) {
+    return 'Respond in English for spoken fields while keeping all JSON keys in English.';
+  }
+  return `Respond in ${language} (using natural native script for ${language}) for spoken fields ("speech", "guidance_speech", "instruction"), while keeping all JSON keys and enum values in English.`;
+}
+
+export function getInquiryLanguageInstruction(hint?: string): string {
+  const hintStr = hint ? ` (detected hint: ${hint})` : '';
+  return `Detect the language of "{user_text}"${hintStr} or any language the user explicitly requests (e.g. "speak in Hindi"). Set "response_language" to its BCP-47 tag (e.g. en-IN, hi-IN, ta-IN, te-IN, kn-IN, ml-IN, mr-IN, bn-IN, gu-IN, pa-IN, es-ES, fr-FR) and write "speech" naturally in that language.`;
+}
 
 export const parseModelJson = cleanAndParseJson;
 
@@ -42,11 +54,14 @@ export function formatDistanceSpeech(m: number): string {
 export async function buildSpeakMessage(
   text: string,
   source: 'inquiry' | 'frame',
-  priority?: string
-): Promise<{ type: 'speak'; text: string; audio?: string; priority?: string }> {
-  const msg: { type: 'speak'; text: string; audio?: string; priority?: string } = {
+  priority?: string,
+  language?: string
+): Promise<{ type: 'speak'; text: string; audio?: string; priority?: string; lang?: string }> {
+  const resolvedLang = resolveTtsLanguage(text, language);
+  const msg: { type: 'speak'; text: string; audio?: string; priority?: string; lang?: string } = {
     type: 'speak',
     text,
+    lang: resolvedLang,
   };
   if (priority) {
     msg.priority = priority;
@@ -56,10 +71,9 @@ export async function buildSpeakMessage(
     GNANI_TTS_MODE === 'all' ||
     (GNANI_TTS_MODE === 'inquiry' && source === 'inquiry');
 
-  // Critical alerts must always use client speechSynthesis for zero latency
-  if (shouldSynthesize && priority !== 'critical') {
+  if (shouldSynthesize) {
     try {
-      const audioBase64 = await synthesize(text);
+      const audioBase64 = await synthesize(text, resolvedLang);
       if (audioBase64) {
         msg.audio = audioBase64;
       }
@@ -104,7 +118,8 @@ export async function processNavFrame(
     .replaceAll('{task}', task)
     .replaceAll('{temporal_context}', temporal_context)
     .replaceAll('{memory}', session.getMemoryContext())
-    .replaceAll('{known_locations}', memory.getLocationSummary());
+    .replaceAll('{known_locations}', memory.getLocationSummary())
+    .replaceAll('{language_instruction}', getLanguageInstruction(session.language));
 
   const result = await askJson(promptText, imageBase64, 0.3);
 
@@ -150,8 +165,8 @@ export async function processNavFrame(
     session.updateMemory(subject, direction, distance, category);
   }
 
-  // Append distance to speech if needed
-  if (speech && distance > 0) {
+  // Append distance to speech if needed (English sessions)
+  if (speech && distance > 0 && session.language.toLowerCase().startsWith('en')) {
     const truncStr = String(Math.trunc(distance));
     if (!speech.includes(truncStr)) {
       speech = `${speech} ${formatDistanceSpeech(distance)} away.`;
@@ -178,7 +193,7 @@ export async function processNavFrame(
       category,
       distance
     );
-    const speakMsg = await buildSpeakMessage(speech, 'frame', priority);
+    const speakMsg = await buildSpeakMessage(speech, 'frame', priority, session.language);
     messages.push(speakMsg);
     spoke = true;
   }
@@ -244,14 +259,23 @@ export async function processMicroFrame(
     };
   }
 
-  const promptText = MICRO_NAV_PROMPT.replaceAll('{target}', session.microTarget);
+  const promptText = MICRO_NAV_PROMPT
+    .replaceAll('{target}', session.microTarget)
+    .replaceAll('{language_instruction}', getLanguageInstruction(session.language));
   const result = await askJson(promptText, imageBase64, 0.1);
 
   if (!result) {
     const afterStatus = getGlobalRateLimitStatus();
     if (afterStatus.isRateLimited) {
       return {
-        messages: [{ type: 'speak', text: 'Rate limit reached. Please hold steady.' }],
+        messages: [
+          await buildSpeakMessage(
+            'Rate limit reached. Please hold steady.',
+            'frame',
+            undefined,
+            session.language
+          ),
+        ],
         rate_limited: true,
         retryAfter: afterStatus.retryAfter,
         is429: true,
@@ -273,7 +297,12 @@ export async function processMicroFrame(
   ];
 
   if (result.guidance_speech) {
-    const speakMsg = await buildSpeakMessage(result.guidance_speech, 'frame');
+    const speakMsg = await buildSpeakMessage(
+      result.guidance_speech,
+      'frame',
+      undefined,
+      session.language
+    );
     messages.push(speakMsg);
   }
 
@@ -310,7 +339,9 @@ export async function processTaskFrame(
   }
 
   const currentStep = session.taskState.plan[session.taskState.currentStepIndex];
-  const promptText = TASK_GUIDANCE_PROMPT.replaceAll('{current_step}', currentStep.instruction);
+  const promptText = TASK_GUIDANCE_PROMPT
+    .replaceAll('{current_step}', currentStep.instruction)
+    .replaceAll('{language_instruction}', getLanguageInstruction(session.language));
 
   const result = await askJson(promptText, imageBase64, 0.1);
 
@@ -332,13 +363,23 @@ export async function processTaskFrame(
     currentStep.completed = true;
     session.taskState.currentStepIndex++;
     if (session.taskState.currentStepIndex >= session.taskState.plan.length) {
-      const speakMsg = await buildSpeakMessage('Task completed! Great job.', 'frame');
+      const speakMsg = await buildSpeakMessage(
+        'Task completed! Great job.',
+        'frame',
+        undefined,
+        session.language
+      );
       messages.push(speakMsg);
       session.taskState.isActive = false;
       session.mode = 'nav';
     } else {
       const nextInstr = session.taskState.plan[session.taskState.currentStepIndex].instruction;
-      const speakMsg = await buildSpeakMessage(`Step done. Next: ${nextInstr}`, 'frame');
+      const speakMsg = await buildSpeakMessage(
+        `Step done. Next: ${nextInstr}`,
+        'frame',
+        undefined,
+        session.language
+      );
       messages.push(speakMsg);
     }
   } else if (result.speech) {
@@ -351,7 +392,12 @@ export async function processTaskFrame(
     );
     if (shouldSpeak) {
       session.speechManager.recordSpeech(result.speech, 'medium', 'task', 'guidance', 'task', 1.0);
-      const speakMsg = await buildSpeakMessage(result.speech, 'frame', 'medium');
+      const speakMsg = await buildSpeakMessage(
+        result.speech,
+        'frame',
+        'medium',
+        session.language
+      );
       messages.push(speakMsg);
     }
   }
@@ -382,10 +428,16 @@ export async function processInquiry(
 
   // Voice inquiries ignore the frame cooldown
   let userText = '';
+  let detectedSttLang: string | undefined;
   if (audioBase64 && typeof audioBase64 === 'string' && audioBase64.trim().length > 0) {
     try {
       const wavBuffer = Buffer.from(audioBase64, 'base64');
-      userText = await transcribe(wavBuffer);
+      const stt = await transcribeWithLanguage(wavBuffer);
+      userText = stt.transcript;
+      detectedSttLang = stt.detectedLanguage;
+      if (detectedSttLang) {
+        session.language = detectedSttLang;
+      }
     } catch (sttErr) {
       console.warn('[NETRA:Inquiry] STT failure:', sttErr);
       userText = '';
@@ -394,7 +446,7 @@ export async function processInquiry(
 
   // If transcription is empty, return "I didn't catch that."
   if (!userText || !userText.trim()) {
-    return [{ type: 'speak', text: "I didn't catch that." }];
+    return [await buildSpeakMessage("I didn't catch that.", 'inquiry', undefined, session.language)];
   }
 
   const task_str = session.taskState.isActive
@@ -404,7 +456,8 @@ export async function processInquiry(
   const promptText = INQUIRY_PROMPT
     .replaceAll('{history_context}', memory.getHistoryContext())
     .replaceAll('{task_state}', task_str)
-    .replaceAll('{user_text}', userText.trim());
+    .replaceAll('{user_text}', userText.trim())
+    .replaceAll('{language_instruction}', getInquiryLanguageInstruction(detectedSttLang || session.language));
 
   // Call Groq with prompt and image only (no audio part)
   const result = await askJson(promptText, imageBase64 || undefined, 0.3);
@@ -412,9 +465,27 @@ export async function processInquiry(
   if (!result) {
     const status = getGlobalRateLimitStatus();
     if (status.isRateLimited) {
-      return [{ type: 'speak', text: 'Service is busy, please try again.' }];
+      return [
+        await buildSpeakMessage(
+          'Service is busy, please try again.',
+          'inquiry',
+          undefined,
+          session.language
+        ),
+      ];
     }
-    return [{ type: 'speak', text: 'Sorry, I had an error processing that.' }];
+    return [
+      await buildSpeakMessage(
+        'Sorry, I had an error processing that.',
+        'inquiry',
+        undefined,
+        session.language
+      ),
+    ];
+  }
+
+  if (typeof result.response_language === 'string' && result.response_language.trim()) {
+    session.language = result.response_language.trim();
   }
 
   const intent = result.intent || 'info';
@@ -442,11 +513,12 @@ export async function processInquiry(
     current_goal: session.currentGoal,
     mode: session.mode,
     task_active: session.taskState.isActive,
+    language: session.language,
     ms: elapsed,
   });
 
-  // speak (with optional Gnani TTS synthesis)
-  const speakMsg = await buildSpeakMessage(speech, 'inquiry');
+  // speak (with Gnani TTS synthesis in detected/requested language)
+  const speakMsg = await buildSpeakMessage(speech, 'inquiry', undefined, session.language);
   finalMessages.push(speakMsg);
 
   return finalMessages;
@@ -458,6 +530,11 @@ export async function handleIntent(
   session: SessionState
 ): Promise<{ overrideSpeech: string | null; taskMessages: any[] }> {
   const taskMessages: any[] = [];
+  const isEnglish = !session.language || session.language.toLowerCase().startsWith('en');
+  const localizedOrFallback = (fallback: string) =>
+    !isEnglish && typeof result?.speech === 'string' && result.speech.trim()
+      ? null
+      : fallback;
 
   switch (intent) {
     case 'micro_nav': {
@@ -465,7 +542,7 @@ export async function handleIntent(
         session.mode = 'micro';
         session.microTarget = result.target;
         return {
-          overrideSpeech: `Guiding you to the ${result.target}. Hold steady.`,
+          overrideSpeech: localizedOrFallback(`Guiding you to the ${result.target}. Hold steady.`),
           taskMessages,
         };
       }
@@ -478,7 +555,7 @@ export async function handleIntent(
       if (goal) {
         session.currentGoal = goal;
         return {
-          overrideSpeech: `Okay, searching for ${goal}.`,
+          overrideSpeech: localizedOrFallback(`Okay, searching for ${goal}.`),
           taskMessages,
         };
       }
@@ -492,7 +569,7 @@ export async function handleIntent(
       session.taskState = { isActive: false, plan: [], currentStepIndex: 0 };
       globalTaskState.isActive = false;
       return {
-        overrideSpeech: 'Stopping all tasks and searches.',
+        overrideSpeech: localizedOrFallback('Stopping all tasks and searches.'),
         taskMessages,
       };
     }
@@ -501,7 +578,7 @@ export async function handleIntent(
       if (result.tag_name && result.scene_description) {
         memory.addLocation(result.tag_name, result.scene_description);
         return {
-          overrideSpeech: `Tagged location as ${result.tag_name}.`,
+          overrideSpeech: localizedOrFallback(`Tagged location as ${result.tag_name}.`),
           taskMessages,
         };
       }
@@ -510,14 +587,15 @@ export async function handleIntent(
 
     case 'task': {
       if (!result.task_name) {
-        return { overrideSpeech: "I didn't hear a task name.", taskMessages };
+        return { overrideSpeech: localizedOrFallback("I didn't hear a task name."), taskMessages };
       }
 
       try {
         const memContext = `${memory.getHistoryContext()}\nLocations: ${memory.getLocationSummary()}`;
         const plannerPrompt = TASK_PLANNER_PROMPT
           .replaceAll('{user_query}', result.task_name)
-          .replaceAll('{memory_context}', memContext);
+          .replaceAll('{memory_context}', memContext)
+          .replaceAll('{language_instruction}', getLanguageInstruction(session.language));
 
         const plannerRes = await askJson(plannerPrompt, undefined, 0.3);
 

@@ -91,17 +91,20 @@ export function handleServerMessage(
       break;
     case 'speak':
       if (msg.text) {
-        if (msg.priority === 'critical') {
-          // Critical-priority alerts always use speechSynthesis for zero latency
+        if (msg.priority === 'critical' && !msg.audio) {
+          // Critical-priority fallback when no Gnani audio is attached
           if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
             try {
               const utter = new SpeechSynthesisUtterance(msg.text);
+              if (msg.lang) {
+                utter.lang = msg.lang;
+              }
               window.speechSynthesis.speak(utter);
             } catch {}
           }
         } else {
-          // Normal speak message: play with Audio element queue if msg.audio exists, else fallback to speechSynthesis
-          audioQueue.play(msg.text, msg.audio);
+          // Play Gnani WAV audio when present, with automatic speechSynthesis fallback
+          audioQueue.play(msg.text, msg.audio, msg.lang);
         }
         cb.announce(msg.text);
       }

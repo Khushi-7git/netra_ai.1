@@ -6,7 +6,7 @@
     },
     "Office Desk": {
       "description": "Corner desk with monitors and keyboard",
-      "timestamp": 1794604590304
+      "timestamp": 1794658746482
     }
   },
   "history": [
@@ -15,6 +15,12 @@
       "location": "Kitchen",
       "scene": "Blue ceramic mug near stove",
       "timestamp": 1794320431928
+    },
+    {
+      "object": "मेज़",
+      "location": null,
+      "scene": "Wooden table ahead",
+      "timestamp": 1794658746484
     }
   ]
 }

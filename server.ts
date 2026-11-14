@@ -11,6 +11,7 @@ import {
   processTaskFrame,
   processInquiry,
   getRateLimitStatus,
+  buildSpeakMessage,
 } from './server/processor.js';
 
 dotenv.config();
@@ -50,7 +51,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
 });
 
 // POST /api/session/start
-app.post('/api/session/start', (req: Request, res: Response) => {
+app.post('/api/session/start', async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.body || {};
     if (!sessionId) {
@@ -69,6 +70,7 @@ app.post('/api/session/start', (req: Request, res: Response) => {
       session.mode = 'task';
       const curInstr =
         session.taskState.plan[session.taskState.currentStepIndex]?.instruction || '';
+      const resumeSpeak = await buildSpeakMessage(`Resuming. Step: ${curInstr}`, 'frame');
 
       return res.json({
         messages: [
@@ -78,10 +80,7 @@ app.post('/api/session/start', (req: Request, res: Response) => {
             current_step_index: session.taskState.currentStepIndex,
             restored: true,
           },
-          {
-            type: 'speak',
-            text: `Resuming. Step: ${curInstr}`,
-          },
+          resumeSpeak,
         ],
         scanIntervalMs: SCAN_INTERVAL_MS,
         microIntervalMs: MICRO_INTERVAL_MS,

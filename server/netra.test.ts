@@ -16,7 +16,12 @@ import { GlobalTaskState, TaskState, SessionState } from './session.js';
 import { parseDir } from '../src/lib/audio.js';
 import { computeMeanPixelDiff, shouldSkipFrame } from '../src/lib/frame-diff.js';
 import { setAskJsonMock, setGlobalRateLimit, resetGlobalRateLimit, getGlobalRateLimitStatus } from './llm.js';
-import { setTranscribeMock, setSynthesizeMock } from './gnani.js';
+import {
+  setTranscribeMock,
+  setSynthesizeMock,
+  detectLanguageFromText,
+  resolveTtsLanguage,
+} from './gnani.js';
 
 test('priorityValue returns expected ranking', () => {
   assert.equal(priorityValue('critical'), 4);
@@ -366,6 +371,87 @@ test('(d) a TTS failure still returns the text', async () => {
   const directMsg = await buildSpeakMessage('Test speech text', 'inquiry');
   assert.equal(directMsg.text, 'Test speech text');
   assert.equal(directMsg.audio, undefined);
+
+  setSynthesizeMock(null);
+  setTranscribeMock(null);
+  setAskJsonMock(null);
+});
+
+test('(e) Gnani TTS is primary across frame, critical, and inquiry speech', async () => {
+  const calls: string[] = [];
+  setSynthesizeMock(async (text) => {
+    calls.push(text);
+    return Buffer.from('RIFF-mock-wav').toString('base64');
+  });
+
+  const frameMsg = await buildSpeakMessage('Chair ahead 2 meters.', 'frame', 'medium');
+  const critMsg = await buildSpeakMessage('Stop! Obstacle directly ahead.', 'frame', 'critical');
+  const inqMsg = await buildSpeakMessage('You are in a hallway.', 'inquiry');
+
+  assert.equal(calls.length, 3);
+  assert.ok(frameMsg.audio, 'Frame speech must attach Gnani audio');
+  assert.ok(critMsg.audio, 'Critical speech must attach Gnani audio');
+  assert.ok(inqMsg.audio, 'Inquiry speech must attach Gnani audio');
+
+  setSynthesizeMock(null);
+});
+
+test('(f) multilingual inquiry updates session language and forwards language to Gnani TTS', async () => {
+  resetGlobalRateLimit();
+
+  assert.equal(detectLanguageFromText('मेरे सामने क्या है?'), 'hi-IN');
+  assert.equal(detectLanguageFromText('என் முன்னால் என்ன உள்ளது?'), 'ta-IN');
+  assert.equal(detectLanguageFromText('నా ముందు ఏముంది?'), 'te-IN');
+  assert.equal(detectLanguageFromText('Hello world'), undefined);
+  assert.equal(resolveTtsLanguage('हे मराठी वाक्य आहे', 'mr-IN'), 'mr-IN');
+  assert.equal(resolveTtsLanguage('यह हिंदी वाक्य है', 'en-IN'), 'hi-IN');
+
+  setTranscribeMock(async () => 'मेरे सामने क्या है?');
+  const ttsLangs: Array<string | undefined> = [];
+  setSynthesizeMock(async (_text, lang) => {
+    ttsLangs.push(lang);
+    return Buffer.from('RIFF-mock-wav').toString('base64');
+  });
+
+  setAskJsonMock(async (prompt) => {
+    if (prompt.includes('DECISION PROTOCOL:')) {
+      return {
+        intent: 'info',
+        response_language: 'hi-IN',
+        speech: 'आपके सामने एक लकड़ी की मेज़ है।',
+      };
+    }
+    assert.ok(prompt.includes('Respond in hi-IN'), 'Frame prompt must request active session language');
+    return {
+      priority: 'medium',
+      category: 'furniture',
+      subject: 'मेज़',
+      distance: 1.5,
+      direction: 'ahead',
+      speech: 'सामने मेज़ है।',
+      scene_description: 'Wooden table ahead',
+      objects: [],
+    };
+  });
+
+  const session = new SessionState('test-multilang-session');
+  const inqMessages = await processInquiry(
+    session,
+    'dummyImageBase64',
+    Buffer.from('dummy-wav').toString('base64'),
+    'audio/wav'
+  );
+
+  assert.equal(session.language, 'hi-IN');
+  const inqSpeak = inqMessages.find((m) => m.type === 'speak');
+  assert.equal(inqSpeak.lang, 'hi-IN');
+  assert.ok(inqSpeak.audio);
+
+  const frameRes = await processNavFrame(session, 'dummyImageBase64', 0);
+  const frameSpeak = frameRes.messages.find((m) => m.type === 'speak');
+  assert.ok(frameSpeak);
+  assert.equal(frameSpeak.lang, 'hi-IN');
+  assert.deepEqual(ttsLangs, ['hi-IN', 'hi-IN']);
 
   setSynthesizeMock(null);
   setTranscribeMock(null);
