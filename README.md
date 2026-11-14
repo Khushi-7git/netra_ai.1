@@ -65,9 +65,6 @@
 3. 👆 Tap the glowing **NETRA** start card (or double-tap the screen, or press `Enter`) to begin scanning.
 4. 🎙️ Tap **Query** and ask something like *"Find a chair"*, *"Remember this as my desk"*, or *"Help me make coffee"*.
 
-> ⏳ If the app is hosted on a free Render plan, the first visit after a period of inactivity can take up to a minute while the server wakes up.
-> 🐢 Scanning defaults to one frame every 15 seconds to respect free-tier API limits. Try [`/?scan=5000`](https://netra-ai-wuq2.onrender.com/?scan=5000) for faster scanning if your API keys allow it.
-
 ---
 
 ## 🌟 Key Highlights
