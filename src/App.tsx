@@ -1075,7 +1075,12 @@ export function App() {
         aria-label="Start NETRA"
         onClick={startSystem}
       >
-        Start NETRA
+        <img
+          src="/assets/aistudio/image_755b2027.png"
+          alt="NETRA - see through sound"
+          className="start-btn-logo"
+        />
+        <span className="start-btn-caption">Tap to Start</span>
       </button>
 
       {/* Requirement 1: Card asking for GROQ_KEY & GNANI_KEY when missing */}
